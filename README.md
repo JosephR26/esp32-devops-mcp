@@ -49,6 +49,11 @@ npm install -g @midas/esp32-devops-mcp
 ```bash
 git clone https://github.com/JosephR26/esp32-devops-mcp.git
 cd esp32-devops-mcp
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Install npm dependencies and build
 npm install
 npm run build
 npm link

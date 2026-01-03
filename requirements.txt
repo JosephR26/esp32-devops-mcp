@@ -1,0 +1,8 @@
+# Python Dependencies for ESP32 DevOps MCP Server
+# Install with: pip install -r requirements.txt
+
+# Serial port management
+pyserial>=3.5
+
+# Future dependencies (as we add more tools)
+# Add more here as needed
