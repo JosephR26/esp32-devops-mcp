@@ -1,0 +1,37 @@
+{
+  "name": "@midas/esp32-devops-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for ESP32 development with build automation, serial port management, and performance testing",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "esp32-devops-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "esp32",
+    "arduino",
+    "platformio",
+    "embedded",
+    "iot",
+    "claude",
+    "devops"
+  ],
+  "author": "JosephR26 <josephreilly19@outlook.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
