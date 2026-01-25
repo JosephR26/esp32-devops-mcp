@@ -510,7 +510,7 @@ async function main() {
 
   console.error('ESP32 DevOps MCP Server started');
   console.error('Version: 1.0.0');
-  console.error('Toolkit path:', process.env.FIRMWARE_TOOLKIT_PATH || 'C:\\Users\\josep\\Documents\\FirmwareToolkit');
+  console.error('Toolkit path:', process.env.FIRMWARE_TOOLKIT_PATH || '[NOT SET - required for benchmarking/testing features]');
 }
 
 main().catch((error) => {

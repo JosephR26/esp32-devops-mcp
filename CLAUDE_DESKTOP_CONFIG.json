@@ -3,10 +3,10 @@
     "esp32-devops": {
       "command": "node",
       "args": [
-        "C:\\Users\\josep\\Documents\\esp32-devops-mcp\\dist\\index.js"
+        "/path/to/esp32-devops-mcp/dist/index.js"
       ],
       "env": {
-        "FIRMWARE_TOOLKIT_PATH": "C:\\Users\\josep\\Documents\\FirmwareToolkit"
+        "FIRMWARE_TOOLKIT_PATH": "/path/to/FirmwareToolkit"
       }
     }
   }

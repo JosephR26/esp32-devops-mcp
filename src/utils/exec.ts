@@ -109,11 +109,23 @@ export async function fileExists(filePath: string): Promise<boolean> {
 }
 
 /**
- * Resolve toolkit path from environment or default location
+ * Resolve toolkit path from environment variable
+ * @throws Error if FIRMWARE_TOOLKIT_PATH is not set
  */
 export function getToolkitPath(): string {
-  return process.env.FIRMWARE_TOOLKIT_PATH ||
-         'C:\\Users\\josep\\Documents\\FirmwareToolkit';
+  const toolkitPath = process.env.FIRMWARE_TOOLKIT_PATH;
+
+  if (!toolkitPath) {
+    throw new Error(
+      'FIRMWARE_TOOLKIT_PATH environment variable is not set.\n' +
+      'Please install FirmwareToolkit and set the environment variable:\n' +
+      '  https://github.com/JosephR26/FirmwareToolkit\n\n' +
+      'Windows: setx FIRMWARE_TOOLKIT_PATH "C:\\path\\to\\FirmwareToolkit"\n' +
+      'Linux/Mac: export FIRMWARE_TOOLKIT_PATH="/path/to/FirmwareToolkit"'
+    );
+  }
+
+  return toolkitPath;
 }
 
 /**
