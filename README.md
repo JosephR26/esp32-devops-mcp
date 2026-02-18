@@ -4,39 +4,39 @@
 
 Transform Claude Code into your personal ESP32 DevOps engineer with intelligent build automation, serial port management, performance benchmarking, and automated testing.
 
-## 🚀 Features
+## Features
 
-### 🔌 Smart Serial Port Management
+### Smart Serial Port Management
 - Auto-detect ESP32 devices
 - Manage favorite ports with custom names
 - Intelligent port recommendations
 - Port usage history
 
-### 🛠️ Build & Flash Automation
+### Build & Flash Automation
 - One-command build, flash, and monitor
 - Detailed memory usage analysis
 - Build error detection and reporting
 - Cross-platform support (Windows, macOS, Linux)
 
-### 📊 Performance Benchmarking
+### Performance Benchmarking
 - Memory leak detection
 - Loop timing analysis
 - WiFi signal quality monitoring
 - Comprehensive performance reports
 
-### ✅ Automated Testing
+### Automated Testing
 - Boot verification
 - Heartbeat detection
 - Memory stability testing
 - Pre-deployment validation
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 - Node.js 18+
 - Python 3.x
-- PlatformIO CLI
-- [FirmwareToolkit](https://github.com/JosephR26/FirmwareToolkit) (included scripts)
+- PlatformIO CLI (`pip install platformio`)
+- [FirmwareToolkit](https://github.com/JosephR26/FirmwareToolkit) (required for benchmarking/testing features)
 
 ### Install from npm
 
@@ -59,14 +59,14 @@ npm run build
 npm link
 ```
 
-## ⚙️ Configuration
+## Configuration
 
-### Claude Desktop Configuration
+### Claude Desktop
 
 Add to your Claude Desktop config file:
 
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ```json
 {
@@ -84,11 +84,33 @@ Add to your Claude Desktop config file:
 }
 ```
 
+If installed from source, use the path to your cloned repository instead:
+
+```json
+{
+  "mcpServers": {
+    "esp32-devops": {
+      "command": "node",
+      "args": [
+        "/path/to/esp32-devops-mcp/dist/index.js"
+      ],
+      "env": {
+        "FIRMWARE_TOOLKIT_PATH": "/path/to/FirmwareToolkit"
+      }
+    }
+  }
+}
+```
+
+A ready-to-edit config template is also included as `CLAUDE_DESKTOP_CONFIG.json` in the repository root.
+
 ### Environment Variables
 
-- `FIRMWARE_TOOLKIT_PATH`: Path to FirmwareToolkit installation (default: `C:\Users\josep\Documents\FirmwareToolkit`)
+| Variable | Description |
+|---|---|
+| `FIRMWARE_TOOLKIT_PATH` | Path to your FirmwareToolkit installation. Required for benchmarking and testing tools. |
 
-## 🎯 Quick Start
+## Quick Start
 
 ### Example Conversations with Claude
 
@@ -112,119 +134,219 @@ Add to your Claude Desktop config file:
 → Uses esp32_validate_deployment
 ```
 
-## 🔧 Available Tools
+## Available Tools
 
 ### Serial Port Management
 
 #### `esp32_list_ports`
-List all available ESP32 serial ports with detection status, favorites, and recommendations.
+List all available serial ports with detection status, favorites, and recommendations.
 
-```typescript
-// No parameters required
-```
+No parameters required.
+
+---
 
 #### `esp32_detect_ports`
 Auto-detect ESP32 devices on serial ports.
 
-#### `esp32_set_default_port`
-Set default serial port for future operations.
+No parameters required.
 
-```typescript
+---
+
+#### `esp32_get_recommended_port`
+Get the recommended serial port based on priority: default > last used > auto-detected.
+
+No parameters required.
+
+---
+
+#### `esp32_set_default_port`
+Set the default serial port for future operations.
+
+```json
 {
-  port: "COM3" // or /dev/ttyUSB0 on Linux
+  "port": "COM3"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | Yes | Serial port name (e.g. `COM3`, `/dev/ttyUSB0`) |
+
+---
 
 #### `esp32_add_favorite_port`
-Add a port to favorites with optional custom name.
+Add a port to favorites with an optional custom name.
 
-```typescript
+```json
 {
-  port: "COM3",
-  name: "Main Dev Board" // optional
+  "port": "COM3",
+  "name": "Main Dev Board"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | Yes | Serial port name |
+| `name` | string | No | Custom label for this port |
+
+---
 
 ### Build & Flash
 
 #### `esp32_build`
-Build ESP32 firmware with detailed output.
+Build ESP32 firmware using PlatformIO with detailed output including memory usage.
 
-```typescript
+```json
 {
-  projectPath: "./my-project", // optional
-  environment: "esp32dev"      // optional
+  "projectPath": "./my-project",
+  "environment": "esp32dev"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to PlatformIO project (defaults to current directory) |
+| `environment` | string | No | PlatformIO environment name (uses project default if omitted) |
+
+---
 
 #### `esp32_flash`
-Flash firmware to ESP32 device.
+Flash compiled firmware to an ESP32 device.
 
-```typescript
+```json
 {
-  projectPath: "./my-project", // optional
-  port: "COM3"                 // optional
+  "projectPath": "./my-project",
+  "port": "COM3"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to PlatformIO project |
+| `port` | string | No | Serial port to flash to (uses recommended port if omitted) |
+
+---
 
 #### `esp32_full_cycle`
-Complete cycle: build → flash → monitor.
+Complete development cycle: build → flash → monitor in one command.
 
-```typescript
+```json
 {
-  projectPath: "./my-project", // optional
-  port: "COM3"                 // optional
+  "projectPath": "./my-project",
+  "port": "COM3"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to PlatformIO project |
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+
+---
+
+#### `esp32_clean`
+Clean build artifacts and cache for a PlatformIO project.
+
+```json
+{
+  "projectPath": "./my-project"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to PlatformIO project (defaults to current directory) |
+
+---
 
 ### Performance & Benchmarking
 
 #### `esp32_benchmark`
-Run comprehensive performance benchmark.
+Run a comprehensive performance benchmark (memory, loop timing, WiFi signal).
 
-```typescript
+```json
 {
-  port: "COM3",     // optional
-  duration: 60,     // seconds, optional
-  baudRate: 115200  // optional
+  "port": "COM3",
+  "duration": 60,
+  "baudRate": 115200
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+| `duration` | number | No | Duration in seconds (default: `60`, max: `3600`) |
+| `baudRate` | number | No | Baud rate (default: `115200`) |
+
+---
 
 #### `esp32_quick_benchmark`
 Quick 30-second performance check.
 
-#### `esp32_detect_memory_leaks`
-Extended memory leak detection test.
-
-```typescript
+```json
 {
-  port: "COM3",   // optional
-  duration: 300   // seconds, optional
+  "port": "COM3"
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+
+---
+
+#### `esp32_detect_memory_leaks`
+Extended memory leak detection test (5-minute default).
+
+```json
+{
+  "port": "COM3",
+  "duration": 300
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+| `duration` | number | No | Test duration in seconds (default: `300`) |
+
+---
 
 ### Firmware Testing
 
 #### `esp32_test_firmware`
-Run automated firmware tests.
+Run automated firmware tests: boot verification, heartbeat detection, memory stability.
 
-```typescript
+```json
 {
-  port: "COM3",     // optional
-  baudRate: 115200  // optional
+  "port": "COM3",
+  "baudRate": 115200
 }
 ```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+| `baudRate` | number | No | Baud rate (default: `115200`) |
+
+---
 
 #### `esp32_validate_deployment`
-Pre-deployment validation with full test suite.
+Pre-deployment validation — runs the full test suite and reports deployment readiness.
 
-```typescript
+```json
 {
-  port: "COM3" // optional
+  "port": "COM3"
 }
 ```
 
-## 🏗️ Architecture
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `port` | string | No | Serial port (uses recommended port if omitted) |
+
+---
+
+## Architecture
 
 ```
 esp32-devops-mcp/
@@ -241,53 +363,17 @@ esp32-devops-mcp/
 │   │   └── validation.ts  # Input validation
 │   └── types/
 │       └── index.ts       # TypeScript types
-├── python/                # Symlinks to toolkit scripts
-├── scripts/               # Batch/shell scripts
 └── package.json
 ```
 
-## 🛡️ Security
+## Security
 
 - Input validation on all parameters
 - No shell injection vulnerabilities
 - Safe command execution with sanitization
 - Timeout protection for long-running operations
 
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## 👨‍💻 Author
-
-**JosephR26**
-- Email: josephreilly19@outlook.com
-- GitHub: [@JosephR26](https://github.com/JosephR26)
-
-## 🙏 Acknowledgments
-
-- Built on [Model Context Protocol](https://github.com/anthropics/mcp)
-- Powered by [PlatformIO](https://platformio.org/)
-- Designed for [Claude Code](https://claude.ai/code)
-
-## 📊 Performance
-
-Expected performance improvements:
-- **Build time**: Same as manual
-- **Workflow efficiency**: 10-20x faster (automated chaining)
-- **Error detection**: Instant feedback
-- **Testing**: Automated vs. manual inspection
-
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Python not found
 Install Python 3.x and ensure it's in your PATH.
@@ -299,15 +385,20 @@ Install Python 3.x and ensure it's in your PATH.
 
 ### Build fails
 - Verify PlatformIO is installed: `pio --version`
-- Check `platformio.ini` exists in project
-- Ensure correct environment name
+- Check `platformio.ini` exists in the project directory
+- Ensure the correct environment name is used
 
 ### Benchmark timeout
-- Increase duration parameter
+- Increase the `duration` parameter
 - Check serial connection stability
-- Verify baud rate matches firmware
+- Verify the baud rate matches your firmware
 
-## 📈 Roadmap
+### MCP server not loading in Claude Desktop
+- Confirm you restarted Claude Desktop after editing the config
+- Verify the path in the config points to `dist/index.js`
+- Check Claude Desktop logs at `%APPDATA%\Claude\logs\` (Windows) or `~/Library/Logs/Claude/` (macOS)
+
+## Roadmap
 
 - [ ] Remote deployment support
 - [ ] OTA update management
@@ -315,14 +406,27 @@ Install Python 3.x and ensure it's in your PATH.
 - [ ] Custom test scenarios
 - [ ] Integration with CI/CD
 
-## 💰 Support
+## Contributing
 
-Love this tool? Consider:
-- ⭐ Starring the repository
-- 🐛 Reporting bugs
-- 💡 Suggesting features
-- 📢 Sharing with others
+Contributions welcome!
 
----
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
-**Built with ❤️ for the ESP32 community**
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+## Author
+
+**JosephR26**
+- GitHub: [@JosephR26](https://github.com/JosephR26)
+
+## Acknowledgments
+
+- Built on [Model Context Protocol](https://github.com/anthropics/mcp)
+- Powered by [PlatformIO](https://platformio.org/)
+- Designed for [Claude Code](https://claude.ai/code)
