@@ -2,6 +2,8 @@
 
 > **AI-powered ESP32 development automation for Claude Code**
 
+[![Featured on LobeHub](https://lobehub.com/badge/mcp--josephr26-esp32-devops-mcp?labelColor=black&color=black&style=flat-square&logo=&logoColor=white)](https://lobehub.com/mcp/josephr26-esp32-devops-mcp)
+
 Transform Claude Code into your personal ESP32 DevOps engineer with intelligent build automation, serial port management, performance benchmarking, and automated testing.
 
 ## Features
@@ -430,3 +432,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 - Built on [Model Context Protocol](https://github.com/anthropics/mcp)
 - Powered by [PlatformIO](https://platformio.org/)
 - Designed for [Claude Code](https://claude.ai/code)
+- Showcased on [LobeHub MCP Marketplace](https://lobehub.com/mcp/josephr26-esp32-devops-mcp)
