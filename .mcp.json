@@ -1,0 +1,32 @@
+{
+  "_comment": "Claude Code project MCP configuration for esp32-devops-mcp.",
+  "_platforms": {
+    "windows": {
+      "args_example": ["C:\\Users\\YOUR_USERNAME\\Projects\\esp32-devops-mcp\\dist\\index.js"],
+      "env_example": {
+        "FIRMWARE_TOOLKIT_PATH": "C:\\Users\\YOUR_USERNAME\\Projects\\FirmwareToolkit"
+      }
+    },
+    "linux": {
+      "args_example": ["/home/YOUR_USERNAME/projects/esp32-devops-mcp/dist/index.js"],
+      "env_example": {
+        "FIRMWARE_TOOLKIT_PATH": "/home/YOUR_USERNAME/projects/FirmwareToolkit"
+      }
+    },
+    "macos": {
+      "args_example": ["/Users/YOUR_USERNAME/Projects/esp32-devops-mcp/dist/index.js"],
+      "env_example": {
+        "FIRMWARE_TOOLKIT_PATH": "/Users/YOUR_USERNAME/Projects/FirmwareToolkit"
+      }
+    }
+  },
+  "mcpServers": {
+    "esp32-devops": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "env": {
+        "FIRMWARE_TOOLKIT_PATH": "${FIRMWARE_TOOLKIT_PATH}"
+      }
+    }
+  }
+}

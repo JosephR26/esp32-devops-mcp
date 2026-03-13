@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__esp32-devops__esp32_list_ports",
+      "mcp__esp32-devops__esp32_detect_ports",
+      "mcp__esp32-devops__esp32_get_recommended_port",
+      "mcp__esp32-devops__esp32_set_default_port",
+      "mcp__esp32-devops__esp32_add_favorite_port",
+      "mcp__esp32-devops__esp32_build",
+      "mcp__esp32-devops__esp32_flash",
+      "mcp__esp32-devops__esp32_full_cycle",
+      "mcp__esp32-devops__esp32_clean",
+      "mcp__esp32-devops__esp32_benchmark",
+      "mcp__esp32-devops__esp32_quick_benchmark",
+      "mcp__esp32-devops__esp32_detect_memory_leaks",
+      "mcp__esp32-devops__esp32_test_firmware",
+      "mcp__esp32-devops__esp32_validate_deployment"
+    ]
+  }
+}
