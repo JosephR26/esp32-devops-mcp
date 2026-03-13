@@ -75,36 +75,46 @@ Add to your Claude Desktop config file:
   "mcpServers": {
     "esp32-devops": {
       "command": "node",
-      "args": [
-        "C:\\Users\\YOUR_USERNAME\\AppData\\Roaming\\npm\\node_modules\\@midas\\esp32-devops-mcp\\dist\\index.js"
-      ],
+      "args": ["C:\\Users\\YOUR_USERNAME\\Projects\\esp32-devops-mcp\\dist\\index.js"],
       "env": {
-        "FIRMWARE_TOOLKIT_PATH": "C:\\Users\\YOUR_USERNAME\\Documents\\FirmwareToolkit"
+        "FIRMWARE_TOOLKIT_PATH": "C:\\Users\\YOUR_USERNAME\\Projects\\FirmwareToolkit"
       }
     }
   }
 }
 ```
 
-If installed from source, use the path to your cloned repository instead:
-
+**Linux:**
 ```json
 {
   "mcpServers": {
     "esp32-devops": {
       "command": "node",
-      "args": [
-        "/path/to/esp32-devops-mcp/dist/index.js"
-      ],
+      "args": ["/home/YOUR_USERNAME/projects/esp32-devops-mcp/dist/index.js"],
       "env": {
-        "FIRMWARE_TOOLKIT_PATH": "/path/to/FirmwareToolkit"
+        "FIRMWARE_TOOLKIT_PATH": "/home/YOUR_USERNAME/projects/FirmwareToolkit"
       }
     }
   }
 }
 ```
 
-A ready-to-edit config template is also included as `CLAUDE_DESKTOP_CONFIG.json` in the repository root.
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "esp32-devops": {
+      "command": "node",
+      "args": ["/Users/YOUR_USERNAME/Projects/esp32-devops-mcp/dist/index.js"],
+      "env": {
+        "FIRMWARE_TOOLKIT_PATH": "/Users/YOUR_USERNAME/Projects/FirmwareToolkit"
+      }
+    }
+  }
+}
+```
+
+For Claude Code (CLI), copy `.mcp.json` from the repo root into your project directory. See [INSTALL.md](INSTALL.md) for full setup details.
 
 ### Environment Variables
 
@@ -135,6 +145,68 @@ A ready-to-edit config template is also included as `CLAUDE_DESKTOP_CONFIG.json`
 "Test my firmware before deployment"
 → Uses esp32_validate_deployment
 ```
+
+## Skills & Claude Code Integration
+
+[Claude Code skills](https://docs.anthropic.com/en/docs/claude-code/skills) let Claude
+auto-activate the right tools based on what you ask. This repo ships six skills in
+`.claude/skills/` — copy them to `~/.claude/skills/` (global) or keep them in
+`.claude/skills/` (project-only).
+
+### ESP32 DevOps skills
+
+| Skill | Trigger examples | MCP tools used |
+|-------|-----------------|----------------|
+| `/flash-target-device` | "flash the firmware", "upload to board", "build and flash" | `esp32_build`, `esp32_flash`, `esp32_full_cycle` |
+| `/run-firmware-tests` | "test firmware", "benchmark", "check memory leaks", "validate deployment" | `esp32_test_firmware`, `esp32_validate_deployment`, `esp32_benchmark`, `esp32_quick_benchmark`, `esp32_detect_memory_leaks` |
+| `/esp32-port-manager` | "which port is my ESP32", "set default port", "list serial ports" | `esp32_list_ports`, `esp32_detect_ports`, `esp32_set_default_port`, `esp32_add_favorite_port` |
+
+### RF / counter-surveillance skills
+
+| Skill | Trigger examples |
+|-------|-----------------|
+| `/rf-capture-analyzer` | "capture RF from midas-recon", "analyse this 433MHz signal", "decode the RF capture" |
+| `/detect-surveillance-device` | "bug sweep", "TSCM sweep", "scan for surveillance devices", "sweep 400–450MHz" |
+| `/generate-detection-rule` | "generate detection code for WiFi deauth", "write firmware detection for 433MHz carrier", "create a Suricata rule" |
+
+### Example invocations
+
+```
+/flash-target-device
+→ Builds and flashes the current PlatformIO project to the recommended port.
+
+/flash-target-device --port /dev/ttyUSB1
+→ Flashes to a specific port.
+
+"Run a full performance benchmark on the current firmware."
+→ Auto-activates /run-firmware-tests → calls esp32_benchmark (60 s).
+
+"Quick bench on COM4."
+→ Auto-activates /run-firmware-tests → calls esp32_quick_benchmark(port="COM4").
+
+"Sweep 400–450 MHz around the office and tell me if anything looks suspicious."
+→ Auto-activates /detect-surveillance-device → runs HackRF/RTL-SDR sweep and
+  produces a structured report.
+
+"Generate firmware detection code for a WiFi deauthentication flood."
+→ Auto-activates /generate-detection-rule → emits C function + optional Suricata rule.
+```
+
+### Installing skills
+
+```bash
+# Global (all projects)
+cp .claude/skills/*.md ~/.claude/skills/
+
+# Project-only (already in place if you cloned this repo)
+# .claude/skills/ is already configured
+```
+
+> **CLI vs Agent SDK:** The `allowed-tools` frontmatter field enforces tool restrictions
+> in Claude Code CLI. When using the [Anthropic Agent SDK](https://docs.anthropic.com/en/docs/agents),
+> pass the same list via the `allowedTools` option in `AgentOptions`.
+
+---
 
 ## Available Tools
 

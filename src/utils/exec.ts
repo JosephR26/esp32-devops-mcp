@@ -1,9 +1,12 @@
 /**
- * Command execution utilities for running Python scripts and batch files
+ * Command execution utilities for running Python scripts and batch files.
+ * Cross-platform: works on Windows, Linux, and macOS.
  */
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { join } from 'path';
+import { access } from 'fs/promises';
 import type { ExecOptions, ExecResult } from '../types/index.js';
 
 const execAsync = promisify(exec);
@@ -55,17 +58,15 @@ export async function executePython(
   options: ExecOptions = {}
 ): Promise<ExecResult> {
   // Try python3 first, then python, then py (Windows launcher)
-  const pythonCommands = ['python', 'python3', 'py'];
+  const pythonCommands = ['python3', 'python', 'py'];
 
   for (const pythonCmd of pythonCommands) {
     try {
-      // Check if this Python is available
       const checkResult = await executeCommand(`${pythonCmd} --version`, {
         timeout: 5000
       });
 
       if (checkResult.success) {
-        // Use this Python to run the script
         const command = `${pythonCmd} "${scriptPath}" ${args.join(' ')}`;
         return await executeCommand(command, options);
       }
@@ -83,33 +84,34 @@ export async function executePython(
 }
 
 /**
- * Execute a batch file (Windows)
+ * Execute a batch file (Windows) or shell script (Linux/macOS)
  */
 export async function executeBatch(
-  batchPath: string,
+  scriptPath: string,
   args: string[] = [],
   options: ExecOptions = {}
 ): Promise<ExecResult> {
-  const command = `cmd /c "${batchPath}" ${args.join(' ')}`;
+  const isWindows = process.platform === 'win32';
+  const command = isWindows
+    ? `cmd /c "${scriptPath}" ${args.join(' ')}`
+    : `bash "${scriptPath}" ${args.join(' ')}`;
   return await executeCommand(command, options);
 }
 
 /**
- * Check if a file exists
+ * Check if a file exists (cross-platform)
  */
 export async function fileExists(filePath: string): Promise<boolean> {
   try {
-    const result = await executeCommand(`cmd /c "if exist "${filePath}" echo 1"`, {
-      timeout: 5000
-    });
-    return result.stdout.includes('1');
+    await access(filePath);
+    return true;
   } catch {
     return false;
   }
 }
 
 /**
- * Resolve toolkit path from environment variable
+ * Resolve toolkit path from environment variable.
  * @throws Error if FIRMWARE_TOOLKIT_PATH is not set
  */
 export function getToolkitPath(): string {
@@ -120,7 +122,7 @@ export function getToolkitPath(): string {
       'FIRMWARE_TOOLKIT_PATH environment variable is not set.\n' +
       'Please install FirmwareToolkit and set the environment variable:\n' +
       '  https://github.com/JosephR26/FirmwareToolkit\n\n' +
-      'Windows: setx FIRMWARE_TOOLKIT_PATH "C:\\path\\to\\FirmwareToolkit"\n' +
+      'Windows:   setx FIRMWARE_TOOLKIT_PATH "C:\\path\\to\\FirmwareToolkit"\n' +
       'Linux/Mac: export FIRMWARE_TOOLKIT_PATH="/path/to/FirmwareToolkit"'
     );
   }
@@ -129,22 +131,22 @@ export function getToolkitPath(): string {
 }
 
 /**
- * Get path to Python script in toolkit
+ * Get path to a Python script in the toolkit's scripts/ directory
  */
 export function getPythonScriptPath(scriptName: string): string {
-  return `${getToolkitPath()}\\scripts\\${scriptName}`;
+  return join(getToolkitPath(), 'scripts', scriptName);
 }
 
 /**
- * Get path to batch script in toolkit
+ * Get path to a batch/shell script in the toolkit's scripts/ directory
  */
 export function getBatchScriptPath(scriptName: string): string {
-  return `${getToolkitPath()}\\scripts\\${scriptName}`;
+  return join(getToolkitPath(), 'scripts', scriptName);
 }
 
 /**
- * Get path to testing script in toolkit
+ * Get path to a testing script in the toolkit's testing/ directory
  */
 export function getTestingScriptPath(scriptName: string): string {
-  return `${getToolkitPath()}\\testing\\${scriptName}`;
+  return join(getToolkitPath(), 'testing', scriptName);
 }

@@ -1,12 +1,57 @@
 {
-  "mcpServers": {
-    "esp32-devops": {
-      "command": "node",
-      "args": [
-        "/path/to/esp32-devops-mcp/dist/index.js"
-      ],
-      "env": {
-        "FIRMWARE_TOOLKIT_PATH": "/path/to/FirmwareToolkit"
+  "_readme": [
+    "Copy the relevant mcpServers block into your Claude Desktop config file.",
+    "Config file locations:",
+    "  Windows : %APPDATA%\\Claude\\claude_desktop_config.json",
+    "  macOS   : ~/Library/Application Support/Claude/claude_desktop_config.json",
+    "  Linux   : ~/.config/claude/claude_desktop_config.json",
+    "Replace YOUR_USERNAME with your OS username.",
+    "FIRMWARE_TOOLKIT_PATH is only required for benchmark/test tools."
+  ],
+
+  "windows_example": {
+    "mcpServers": {
+      "esp32-devops": {
+        "command": "node",
+        "args": ["C:\\Users\\YOUR_USERNAME\\Projects\\esp32-devops-mcp\\dist\\index.js"],
+        "env": {
+          "FIRMWARE_TOOLKIT_PATH": "C:\\Users\\YOUR_USERNAME\\Projects\\FirmwareToolkit"
+        }
+      }
+    }
+  },
+
+  "linux_example": {
+    "mcpServers": {
+      "esp32-devops": {
+        "command": "node",
+        "args": ["/home/YOUR_USERNAME/projects/esp32-devops-mcp/dist/index.js"],
+        "env": {
+          "FIRMWARE_TOOLKIT_PATH": "/home/YOUR_USERNAME/projects/FirmwareToolkit"
+        }
+      }
+    }
+  },
+
+  "macos_example": {
+    "mcpServers": {
+      "esp32-devops": {
+        "command": "node",
+        "args": ["/Users/YOUR_USERNAME/Projects/esp32-devops-mcp/dist/index.js"],
+        "env": {
+          "FIRMWARE_TOOLKIT_PATH": "/Users/YOUR_USERNAME/Projects/FirmwareToolkit"
+        }
+      }
+    }
+  },
+
+  "global_npm_install_example": {
+    "mcpServers": {
+      "esp32-devops": {
+        "command": "esp32-devops-mcp",
+        "env": {
+          "FIRMWARE_TOOLKIT_PATH": "/path/to/FirmwareToolkit"
+        }
       }
     }
   }
