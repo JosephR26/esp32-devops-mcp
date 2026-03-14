@@ -3,13 +3,14 @@
  * Cross-platform: works on Windows, Linux, and macOS.
  */
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
 import { access } from 'fs/promises';
 import type { ExecOptions, ExecResult } from '../types/index.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Execute a command with timeout and error handling
@@ -50,7 +51,8 @@ export async function executeCommand(
 }
 
 /**
- * Execute a Python script
+ * Execute a Python script.
+ * Uses execFile with an argv array to avoid shell interpolation of args.
  */
 export async function executePython(
   scriptPath: string,
@@ -60,18 +62,40 @@ export async function executePython(
   // Try python3 first, then python, then py (Windows launcher)
   const pythonCommands = ['python3', 'python', 'py'];
 
+  const execOpts = {
+    cwd: options.cwd ?? process.cwd(),
+    timeout: options.timeout ?? 120000,
+    env: { ...(options.env ?? process.env) } as Record<string, string>,
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true
+  };
+
   for (const pythonCmd of pythonCommands) {
     try {
-      const checkResult = await executeCommand(`${pythonCmd} --version`, {
-        timeout: 5000
-      });
+      // Probe availability without shell interpolation
+      await execFileAsync(pythonCmd, ['--version'], { timeout: 5000 });
 
-      if (checkResult.success) {
-        const command = `${pythonCmd} "${scriptPath}" ${args.join(' ')}`;
-        return await executeCommand(command, options);
-      }
-    } catch {
-      continue;
+      const { stdout, stderr } = await execFileAsync(
+        pythonCmd,
+        [scriptPath, ...args],
+        execOpts
+      );
+      return {
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode: 0,
+        success: true
+      };
+    } catch (error: any) {
+      // If the error is "not found", try the next candidate
+      if (error.code === 'ENOENT') continue;
+      // Script ran but exited non-zero — return the output, stop trying
+      return {
+        stdout: error.stdout?.trim() || '',
+        stderr: error.stderr?.trim() || error.message,
+        exitCode: error.code ?? 1,
+        success: false
+      };
     }
   }
 
@@ -84,18 +108,44 @@ export async function executePython(
 }
 
 /**
- * Execute a batch file (Windows) or shell script (Linux/macOS)
+ * Execute a batch file (Windows) or shell script (Linux/macOS).
+ * Uses execFile with an argv array — no shell interpolation of args.
+ * Uses /bin/sh on POSIX for maximum portability (no bash dependency).
  */
 export async function executeBatch(
   scriptPath: string,
   args: string[] = [],
   options: ExecOptions = {}
 ): Promise<ExecResult> {
-  const isWindows = process.platform === 'win32';
-  const command = isWindows
-    ? `cmd /c "${scriptPath}" ${args.join(' ')}`
-    : `bash "${scriptPath}" ${args.join(' ')}`;
-  return await executeCommand(command, options);
+  const execOpts = {
+    cwd: options.cwd ?? process.cwd(),
+    timeout: options.timeout ?? 120000,
+    env: { ...(options.env ?? process.env) } as Record<string, string>,
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true
+  };
+
+  try {
+    const isWindows = process.platform === 'win32';
+    const [interpreter, interpArgs] = isWindows
+      ? ['cmd', ['/c', scriptPath, ...args]]
+      : ['/bin/sh', [scriptPath, ...args]];
+
+    const { stdout, stderr } = await execFileAsync(interpreter, interpArgs, execOpts);
+    return {
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+      exitCode: 0,
+      success: true
+    };
+  } catch (error: any) {
+    return {
+      stdout: error.stdout?.trim() || '',
+      stderr: error.stderr?.trim() || error.message,
+      exitCode: error.code ?? 1,
+      success: false
+    };
+  }
 }
 
 /**
