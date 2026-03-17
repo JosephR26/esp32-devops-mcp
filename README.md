@@ -161,14 +161,6 @@ auto-activate the right tools based on what you ask. This repo ships six skills 
 | `/run-firmware-tests` | "test firmware", "benchmark", "check memory leaks", "validate deployment" | `esp32_test_firmware`, `esp32_validate_deployment`, `esp32_benchmark`, `esp32_quick_benchmark`, `esp32_detect_memory_leaks` |
 | `/esp32-port-manager` | "which port is my ESP32", "set default port", "list serial ports" | `esp32_list_ports`, `esp32_detect_ports`, `esp32_set_default_port`, `esp32_add_favorite_port` |
 
-### RF / counter-surveillance skills
-
-| Skill | Trigger examples |
-|-------|-----------------|
-| `/rf-capture-analyzer` | "capture RF from midas-recon", "analyse this 433MHz signal", "decode the RF capture" |
-| `/detect-surveillance-device` | "bug sweep", "TSCM sweep", "scan for surveillance devices", "sweep 400–450MHz" |
-| `/generate-detection-rule` | "generate detection code for WiFi deauth", "write firmware detection for 433MHz carrier", "create a Suricata rule" |
-
 ### Example invocations
 
 ```
@@ -184,12 +176,6 @@ auto-activate the right tools based on what you ask. This repo ships six skills 
 "Quick bench on COM4."
 → Auto-activates /run-firmware-tests → calls esp32_quick_benchmark(port="COM4").
 
-"Sweep 400–450 MHz around the office and tell me if anything looks suspicious."
-→ Auto-activates /detect-surveillance-device → runs HackRF/RTL-SDR sweep and
-  produces a structured report.
-
-"Generate firmware detection code for a WiFi deauthentication flood."
-→ Auto-activates /generate-detection-rule → emits C function + optional Suricata rule.
 ```
 
 ### Installing skills
