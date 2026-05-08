@@ -47,8 +47,7 @@ node dist/index.js     # smoke-test the server
 ```
 
 ## Skills available
-Use `/flash-target-device`, `/run-firmware-tests`, `/esp32-port-manager`,
-`/rf-capture-analyzer`, `/detect-surveillance-device`, `/generate-detection-rule`.
+Use `/flash-target-device`, `/run-firmware-tests`, `/esp32-port-manager`.
 See `.claude/skills/` for full documentation.
 
 ## Coding conventions
