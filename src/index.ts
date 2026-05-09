@@ -20,6 +20,9 @@ import * as serialTools from './tools/serial.js';
 import * as buildTools from './tools/build.js';
 import * as benchmarkTools from './tools/benchmark.js';
 import * as testTools from './tools/test.js';
+import * as projectTools from './tools/project.js';
+import * as logTools from './tools/logs.js';
+import * as otaTools from './tools/ota.js';
 
 /**
  * MCP Server instance
@@ -27,7 +30,7 @@ import * as testTools from './tools/test.js';
 const server = new Server(
   {
     name: 'esp32-devops-mcp',
-    version: '1.0.0',
+    version: '1.1.0',
   },
   {
     capabilities: {
@@ -224,6 +227,147 @@ const tools = [
           type: 'number',
           description: 'Test duration in seconds (default: 300)',
           default: 300,
+        },
+      },
+      required: [],
+    },
+  },
+
+  // Project Lifecycle Tools
+  {
+    name: 'esp32_create_project',
+    description: 'Scaffold a new PlatformIO ESP32 project with a starter template',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Project name (letters, numbers, underscores, hyphens)',
+        },
+        projectPath: {
+          type: 'string',
+          description: 'Parent directory for the new project (optional, defaults to cwd)',
+        },
+        board: {
+          type: 'string',
+          description: 'PlatformIO board ID (default: esp32dev)',
+          default: 'esp32dev',
+        },
+        template: {
+          type: 'string',
+          description: 'Starter template: bare | wifi | ble | mqtt (default: bare)',
+          enum: ['bare', 'wifi', 'ble', 'mqtt'],
+          default: 'bare',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'esp32_validate_project',
+    description: 'Validate a PlatformIO project structure and report missing files or misconfigurations',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to PlatformIO project (optional, uses cwd)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'esp32_list_libraries',
+    description: 'Search the PlatformIO library registry or list installed libraries',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search term (optional)',
+        },
+        installed: {
+          type: 'boolean',
+          description: 'List installed libraries instead of searching registry (default: false)',
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'esp32_run_tests',
+    description: 'Run PlatformIO unit tests and return structured pass/fail results',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to PlatformIO project (optional)',
+        },
+        environment: {
+          type: 'string',
+          description: 'PlatformIO environment to test (optional)',
+        },
+        filter: {
+          type: 'string',
+          description: 'Test name filter pattern (optional, e.g. "test_sensor*")',
+        },
+      },
+      required: [],
+    },
+  },
+
+  // Log Analysis Tools
+  {
+    name: 'esp32_parse_logs',
+    description: 'Parse a saved ESP32 serial log file into structured entries with severity, tag, timestamp, and panic detection',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        logPath: {
+          type: 'string',
+          description: 'Absolute or relative path to the log file',
+        },
+      },
+      required: ['logPath'],
+    },
+  },
+
+  // OTA & Network Tools
+  {
+    name: 'esp32_generate_ota_image',
+    description: 'Package the built firmware.bin for OTA deployment — returns path, size, MD5, and SHA-256',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to PlatformIO project (optional)',
+        },
+        environment: {
+          type: 'string',
+          description: 'PlatformIO environment whose firmware to package (optional, auto-detected)',
+        },
+        outputPath: {
+          type: 'string',
+          description: 'Directory to copy the OTA image into (optional)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'esp32_list_network_devices',
+    description: 'Discover ESP32 devices on the local network via mDNS (avahi/dns-sd) with ARP fallback',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timeout: {
+          type: 'number',
+          description: 'Discovery timeout in milliseconds (default: 5000)',
+          default: 5000,
         },
       },
       required: [],
@@ -482,6 +626,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+      // Project Lifecycle Tools
+    if (name === 'esp32_create_project') {
+      const result = await projectTools.createProject(
+        args.name as string,
+        args.projectPath as string | undefined,
+        args.board as string | undefined,
+        args.template as string | undefined
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === 'esp32_validate_project') {
+      const result = await projectTools.validateProject(args.projectPath as string | undefined);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === 'esp32_list_libraries') {
+      const result = await projectTools.listLibraries(
+        args.query as string | undefined,
+        args.installed as boolean | undefined
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === 'esp32_run_tests') {
+      const result = await projectTools.runPlatformIOTests(
+        args.projectPath as string | undefined,
+        args.environment as string | undefined,
+        args.filter as string | undefined
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    // Log Analysis Tools
+    if (name === 'esp32_parse_logs') {
+      const result = await logTools.parseSerialLogs(args.logPath as string);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    // OTA & Network Tools
+    if (name === 'esp32_generate_ota_image') {
+      const result = await otaTools.generateOTAImage(
+        args.projectPath as string | undefined,
+        args.environment as string | undefined,
+        args.outputPath as string | undefined
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === 'esp32_list_network_devices') {
+      const result = await otaTools.listNetworkDevices(args.timeout as number | undefined);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
     // Unknown tool
     throw new Error(`Unknown tool: ${name}`);
 
@@ -509,7 +707,7 @@ async function main() {
   await server.connect(transport);
 
   console.error('ESP32 DevOps MCP Server started');
-  console.error('Version: 1.0.0');
+  console.error('Version: 1.1.0');
   console.error('Toolkit path:', process.env.FIRMWARE_TOOLKIT_PATH || '[NOT SET - required for benchmarking/testing features]');
 }
 
