@@ -253,9 +253,10 @@ export async function listLibraries(
     return { success: true, libraries, count: libraries.length };
   } catch {
     return {
-      success: true,
-      libraries: [{ name: 'raw', description: result.stdout }],
+      success: false,
+      libraries: [],
       count: 0,
+      error: 'Failed to parse pio lib output as JSON',
     };
   }
 }
@@ -271,7 +272,7 @@ export async function runPlatformIOTests(
   if (environment && !validateEnvironment(environment)) {
     return { success: false, output: '', suites: [], totalPassed: 0, totalFailed: 0, error: 'Invalid environment name' };
   }
-  if (filter && !/^[a-zA-Z0-9_*/-]+$/.test(filter)) {
+  if (filter && !/^[-a-zA-Z0-9_*\/]+$/.test(filter)) {
     return { success: false, output: '', suites: [], totalPassed: 0, totalFailed: 0, error: 'Invalid filter pattern' };
   }
 
@@ -291,7 +292,7 @@ export async function runPlatformIOTests(
 
   return {
     success: result.success && totalFailed === 0,
-    output: result.stdout,
+    output: result.stdout + (result.stderr ? '\n' + result.stderr : ''),
     suites,
     totalPassed,
     totalFailed,

@@ -1,3 +1,37 @@
+# ESP32 DevOps MCP Server v1.1.0
+
+**Project Lifecycle, Log Analysis & OTA — 21 tools total**
+
+Expands the server from 14 to 21 tools, covering the full ESP32 DevOps lifecycle from initial project scaffolding through to OTA-ready firmware packaging and network device discovery.
+
+## New Tools
+
+### Project Lifecycle (4 tools)
+- **`esp32_create_project`** — scaffold a new PlatformIO project with selectable starter templates: `bare`, `wifi`, `ble`, `mqtt`
+- **`esp32_validate_project`** — inspect `platformio.ini`, verify `[env:]` sections, board, framework, and `src/` layout; returns categorised issues
+- **`esp32_list_libraries`** — search the PlatformIO library registry or list installed libraries; results returned as structured JSON
+- **`esp32_run_tests`** — run `pio test` with optional environment/filter; parses Unity output into per-suite pass/fail/ignored counts
+
+### Log Analysis (1 tool)
+- **`esp32_parse_logs`** — read a saved serial log file and classify every line by ESP-IDF log level (`E/W/I/D/V`); detects Guru Meditation panics, stack traces, and tracks free-heap min/max
+
+### OTA & Network (2 tools)
+- **`esp32_generate_ota_image`** — locate `firmware.bin` in `.pio/build/`, compute MD5 and SHA-256, optionally copy to a release directory; returns full deployment metadata
+- **`esp32_list_network_devices`** — discover ESP32 devices on the local network via mDNS (`avahi-browse` on Linux, `dns-sd` on macOS) with ARP table fallback
+
+## Improvements
+- Updated `@modelcontextprotocol/sdk` from `^1.0.0` → `^1.29.0`
+- Cleaned up `.mcp.json` to remove non-standard fields (`_comment`, `_platforms`), leaving only the spec-compliant `mcpServers` block
+
+## Bug Fixes
+- Fixed filter regex in `esp32_run_tests` — `-` was defining an unintended character range
+- `esp32_list_libraries` now returns `success: false` on JSON parse failure instead of a misleading empty success
+- `esp32_run_tests` output now includes stderr so no output is silently discarded
+- `esp32_list_network_devices` ARP fallback now honours the caller-supplied timeout
+- ARP parser extended to handle both macOS/Windows `(IP)` format and Linux `arp -n` space-separated format
+
+---
+
 # ESP32 DevOps MCP Server v1.0.0 🚀
 
 **Initial Release - AI-Powered ESP32 Development Automation**
