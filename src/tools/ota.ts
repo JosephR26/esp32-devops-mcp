@@ -88,12 +88,11 @@ export async function listNetworkDevices(timeoutMs: number = 5000): Promise<Netw
   } else if (platform === 'darwin') {
     return scanMacOS(timeoutMs);
   } else {
-    return scanARP('arp');
+    return scanARP('arp', timeoutMs);
   }
 }
 
 async function scanLinux(timeoutMs: number): Promise<NetworkScanResult> {
-  const secs = Math.max(2, Math.floor(timeoutMs / 1000));
   const result = await executeCommand(
     `avahi-browse -t -p -r _arduino._tcp 2>/dev/null; avahi-browse -t -p -r _http._tcp 2>/dev/null`,
     { timeout: timeoutMs + 2000 }
@@ -101,12 +100,11 @@ async function scanLinux(timeoutMs: number): Promise<NetworkScanResult> {
   if (result.stdout.trim()) {
     return { success: true, devices: parseAvahi(result.stdout), method: 'avahi-browse' };
   }
-  // avahi not available — fall back
-  return scanARP('arp -n');
+  // avahi not available — fall back to Linux ARP format
+  return scanARP('arp -n', timeoutMs);
 }
 
 async function scanMacOS(timeoutMs: number): Promise<NetworkScanResult> {
-  const secs = Math.max(2, Math.floor(timeoutMs / 1000));
   const result = await executeCommand(
     `dns-sd -B _arduino._tcp local`,
     { timeout: timeoutMs }
@@ -114,11 +112,11 @@ async function scanMacOS(timeoutMs: number): Promise<NetworkScanResult> {
   if (result.stdout.trim()) {
     return { success: true, devices: parseDNSSD(result.stdout), method: 'dns-sd' };
   }
-  return scanARP('arp -a');
+  return scanARP('arp -a', timeoutMs);
 }
 
-async function scanARP(cmd: string): Promise<NetworkScanResult> {
-  const result = await executeCommand(cmd, { timeout: 5000 });
+async function scanARP(cmd: string, timeoutMs: number): Promise<NetworkScanResult> {
+  const result = await executeCommand(cmd, { timeout: timeoutMs });
   return {
     success: result.success,
     devices: parseARP(result.stdout),
@@ -157,10 +155,18 @@ function parseDNSSD(output: string): NetworkDevice[] {
 
 function parseARP(output: string): NetworkDevice[] {
   const devices: NetworkDevice[] = [];
+  const IP = /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/;
   for (const line of output.split('\n')) {
-    const match = line.match(/\((\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\)/);
-    if (match) {
-      devices.push({ hostname: match[1], ip: match[1] });
+    // macOS / Windows: "? (192.168.1.x) at xx:xx:xx:xx:xx:xx ..."
+    const parenMatch = line.match(new RegExp(`\\((${IP.source})\\)`));
+    if (parenMatch) {
+      devices.push({ hostname: parenMatch[1], ip: parenMatch[1] });
+      continue;
+    }
+    // Linux arp -n: "192.168.1.x    ether   xx:xx:xx:xx:xx:xx  ..."
+    const linuxMatch = line.match(new RegExp(`^(${IP.source})\\s`));
+    if (linuxMatch) {
+      devices.push({ hostname: linuxMatch[1], ip: linuxMatch[1] });
     }
   }
   return devices;

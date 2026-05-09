@@ -4,13 +4,13 @@
 
 [![Featured on LobeHub](https://lobehub.com/badge/mcp--josephr26-esp32-devops-mcp?labelColor=black&color=black&style=flat-square&logo=&logoColor=white)](https://lobehub.com/mcp/josephr26-esp32-devops-mcp)
 
-Transform Claude Code into your personal ESP32 DevOps engineer with intelligent build automation, serial port management, performance benchmarking, and automated testing.
+Transform Claude Code into your personal ESP32 DevOps engineer — 21 tools covering the full development lifecycle from project scaffolding to OTA deployment.
 
 ## Features
 
 ### Smart Serial Port Management
 - Auto-detect ESP32 devices
-- Manage favorite ports with custom names
+- Manage favourite ports with custom names
 - Intelligent port recommendations
 - Port usage history
 
@@ -31,6 +31,21 @@ Transform Claude Code into your personal ESP32 DevOps engineer with intelligent 
 - Heartbeat detection
 - Memory stability testing
 - Pre-deployment validation
+
+### Project Lifecycle (new in v1.1.0)
+- Scaffold new PlatformIO projects with starter templates (bare, WiFi, BLE, MQTT)
+- Validate project structure and `platformio.ini` configuration
+- Search the PlatformIO library registry or list installed libraries
+- Run PlatformIO unit tests with structured pass/fail output
+
+### Log Analysis (new in v1.1.0)
+- Parse saved serial log files into typed entries (ESP-IDF E/W/I/D/V levels)
+- Detect Guru Meditation panics and stack traces automatically
+- Track free-heap min/max across a capture
+
+### OTA & Network (new in v1.1.0)
+- Package built firmware with MD5 and SHA-256 checksums, ready for OTA
+- Discover ESP32 devices on the local network via mDNS (avahi / dns-sd) with ARP fallback
 
 ## Installation
 
@@ -130,6 +145,9 @@ For Claude Code (CLI), copy `.mcp.json` from the repo root into your project dir
 "List all available ESP32 ports"
 → Uses esp32_list_ports
 
+"Create a new WiFi project called sensor_node"
+→ Uses esp32_create_project (template: wifi)
+
 "Build my ESP32 project"
 → Uses esp32_build
 
@@ -144,6 +162,15 @@ For Claude Code (CLI), copy `.mcp.json` from the repo root into your project dir
 
 "Test my firmware before deployment"
 → Uses esp32_validate_deployment
+
+"Parse the serial log I captured earlier"
+→ Uses esp32_parse_logs
+
+"Package the firmware for OTA update"
+→ Uses esp32_generate_ota_image
+
+"Find ESP32 devices on my network"
+→ Uses esp32_list_network_devices
 ```
 
 ## Skills & Claude Code Integration
@@ -405,17 +432,150 @@ Pre-deployment validation — runs the full test suite and reports deployment re
 
 ---
 
+### Project Lifecycle
+
+#### `esp32_create_project`
+Scaffold a new PlatformIO ESP32 project with a starter template.
+
+```json
+{
+  "name": "sensor_node",
+  "board": "esp32dev",
+  "template": "wifi"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Project name (letters, numbers, `_`, `-`) |
+| `projectPath` | string | No | Parent directory (defaults to cwd) |
+| `board` | string | No | PlatformIO board ID (default: `esp32dev`) |
+| `template` | string | No | `bare` \| `wifi` \| `ble` \| `mqtt` (default: `bare`) |
+
+---
+
+#### `esp32_validate_project`
+Validate a PlatformIO project structure and report missing files or misconfigurations.
+
+```json
+{
+  "projectPath": "./sensor_node"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to project (defaults to cwd) |
+
+---
+
+#### `esp32_list_libraries`
+Search the PlatformIO library registry or list installed libraries.
+
+```json
+{
+  "query": "DHT sensor",
+  "installed": false
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | No | Search term |
+| `installed` | boolean | No | List installed libs instead of searching registry (default: `false`) |
+
+---
+
+#### `esp32_run_tests`
+Run PlatformIO unit tests and return structured per-suite pass/fail results.
+
+```json
+{
+  "projectPath": "./sensor_node",
+  "environment": "esp32dev",
+  "filter": "test_sensor*"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to project (defaults to cwd) |
+| `environment` | string | No | PlatformIO environment to test |
+| `filter` | string | No | Test name filter pattern (e.g. `test_sensor*`) |
+
+---
+
+### Log Analysis
+
+#### `esp32_parse_logs`
+Parse a saved ESP32 serial log file into structured entries with severity classification, panic detection, and heap tracking.
+
+```json
+{
+  "logPath": "./logs/capture_2026-05-09.txt"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `logPath` | string | Yes | Path to the log file |
+
+Returns each log line classified by level (`ERROR`, `WARN`, `INFO`, `DEBUG`, `VERBOSE`), plus a summary with error/warning/panic counts and heap min/max.
+
+---
+
+### OTA & Network
+
+#### `esp32_generate_ota_image`
+Package the built `firmware.bin` for OTA deployment — returns the image path, size, MD5, and SHA-256.
+
+```json
+{
+  "projectPath": "./sensor_node",
+  "environment": "esp32dev",
+  "outputPath": "./releases"
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `projectPath` | string | No | Path to project (defaults to cwd) |
+| `environment` | string | No | PlatformIO environment (auto-detected if omitted) |
+| `outputPath` | string | No | Directory to copy the OTA image into |
+
+---
+
+#### `esp32_list_network_devices`
+Discover ESP32 devices on the local network via mDNS, with ARP table fallback.
+
+```json
+{
+  "timeout": 5000
+}
+```
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `timeout` | number | No | Discovery timeout in ms (default: `5000`) |
+
+Uses `avahi-browse` on Linux, `dns-sd` on macOS. Falls back to the ARP table on Windows or when mDNS tools are unavailable.
+
+---
+
 ## Architecture
 
 ```
 esp32-devops-mcp/
 ├── src/
-│   ├── index.ts           # MCP server entry point
+│   ├── index.ts           # MCP server entry point (21 tools)
 │   ├── tools/
 │   │   ├── serial.ts      # Serial port management
 │   │   ├── build.ts       # Build & flash tools
 │   │   ├── benchmark.ts   # Performance tools
-│   │   └── test.ts        # Testing tools
+│   │   ├── test.ts        # Firmware testing tools
+│   │   ├── project.ts     # Project lifecycle tools (v1.1.0)
+│   │   ├── logs.ts        # Log analysis tools (v1.1.0)
+│   │   └── ota.ts         # OTA & network tools (v1.1.0)
 │   ├── utils/
 │   │   ├── exec.ts        # Command execution
 │   │   ├── parser.ts      # Output parsing
@@ -459,11 +619,13 @@ Install Python 3.x and ensure it's in your PATH.
 
 ## Roadmap
 
-- [ ] Remote deployment support
-- [ ] OTA update management
-- [ ] Multi-device testing
-- [ ] Custom test scenarios
-- [ ] Integration with CI/CD
+- [x] OTA image packaging with checksums (v1.1.0)
+- [x] Project scaffolding and validation (v1.1.0)
+- [x] Serial log analysis with panic detection (v1.1.0)
+- [x] Network device discovery via mDNS (v1.1.0)
+- [ ] Multi-device parallel testing
+- [ ] CI/CD pipeline integration
+- [ ] Custom test scenario definitions
 
 ## Contributing
 
