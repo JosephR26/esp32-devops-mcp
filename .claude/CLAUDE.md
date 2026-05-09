@@ -2,10 +2,10 @@
 
 ## What this repo is
 
-MCP server that exposes 14 ESP32 development tools to Claude via the Model Context Protocol.
+MCP server that exposes 21 ESP32 development tools to Claude via the Model Context Protocol.
 It wraps FirmwareToolkit and PlatformIO for build / flash / test / benchmark operations.
 
-## MCP tools reference (14 tools)
+## MCP tools reference (21 tools)
 
 ### Serial port management
 - `esp32_list_ports` — list all ports with detection status and favorites
@@ -28,6 +28,19 @@ It wraps FirmwareToolkit and PlatformIO for build / flash / test / benchmark ope
 ### Firmware testing
 - `esp32_test_firmware(port?, baudRate?)` — boot / heartbeat / memory tests
 - `esp32_validate_deployment(port?)` — readiness assessment with issues/warnings
+
+### Project lifecycle
+- `esp32_create_project(name, projectPath?, board?, template?)` — scaffold a new PlatformIO project
+- `esp32_validate_project(projectPath?)` — check project structure and platformio.ini
+- `esp32_list_libraries(query?, installed?)` — search registry or list installed libraries
+- `esp32_run_tests(projectPath?, environment?, filter?)` — run PlatformIO unit tests
+
+### Log analysis
+- `esp32_parse_logs(logPath)` — parse serial log file into structured entries with panic detection
+
+### OTA & network
+- `esp32_generate_ota_image(projectPath?, environment?, outputPath?)` — package firmware.bin with MD5/SHA-256
+- `esp32_list_network_devices(timeout?)` — discover ESP32s via mDNS (avahi/dns-sd) with ARP fallback
 
 ## Environment variables
 - `FIRMWARE_TOOLKIT_PATH` — path to FirmwareToolkit clone (required for benchmark/test tools)
