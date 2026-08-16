@@ -8,7 +8,20 @@ import { parseTestOutput } from '../utils/parser.js';
 import { validateSerialPort, validateBaudRate } from '../utils/validation.js';
 import type { FirmwareTestResult } from '../types/index.js';
 
-const SCRIPT_PATH = getTestingScriptPath('serial-test.py');
+/**
+ * Resolve the serial-test.py script path lazily.
+ *
+ * Resolved per call rather than at module load so that a missing
+ * FIRMWARE_TOOLKIT_PATH degrades to a per-tool error instead of preventing the
+ * whole MCP server from starting.
+ */
+function resolveScript(): { path: string; error?: never } | { path?: never; error: string } {
+  try {
+    return { path: getTestingScriptPath('serial-test.py') };
+  } catch (error: any) {
+    return { error: error.message };
+  }
+}
 
 /**
  * Run automated firmware tests
@@ -47,8 +60,13 @@ export async function runFirmwareTests(
   }
   args.push('--baudrate', baudRate.toString());
 
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { allPassed: false, success: false, error: script.error };
+  }
+
   // Execute tests
-  const result = await executePython(SCRIPT_PATH, args, {
+  const result = await executePython(script.path, args, {
     timeout: 120000 // 2 minutes for tests
   });
 

@@ -56,3 +56,4 @@ ENV/
 
 # Project specific
 .esp32_ports.json
+.test-build/
