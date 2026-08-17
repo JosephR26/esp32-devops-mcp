@@ -71,10 +71,23 @@ export async function executePython(
   };
 
   for (const pythonCmd of pythonCommands) {
+    // Probe availability separately from running the script. A probe failure means
+    // this candidate is unusable, whatever the reason, so move to the next one.
+    //
+    // ENOENT is not the only way a candidate can be unusable: on Windows, `python3`
+    // is commonly a Microsoft Store *alias stub* under
+    // %LOCALAPPDATA%\Microsoft\WindowsApps. It exists on PATH, so it never raises
+    // ENOENT, but it runs nothing and exits 9009 printing "Python was not found;
+    // run without arguments to install from the Microsoft Store". Treating that as
+    // a script error used to abort the whole loop and report Python as missing on
+    // machines with a perfectly good `python` next in the list.
     try {
-      // Probe availability without shell interpolation
       await execFileAsync(pythonCmd, ['--version'], { timeout: 5000 });
+    } catch {
+      continue;
+    }
 
+    try {
       const { stdout, stderr } = await execFileAsync(
         pythonCmd,
         [scriptPath, ...args],
@@ -87,9 +100,8 @@ export async function executePython(
         success: true
       };
     } catch (error: any) {
-      // If the error is "not found", try the next candidate
-      if (error.code === 'ENOENT') continue;
-      // Script ran but exited non-zero — return the output, stop trying
+      // The interpreter ran the script and it failed — that is a real result, not a
+      // reason to try another interpreter.
       return {
         stdout: error.stdout?.trim() || '',
         stderr: error.stderr?.trim() || error.message,
