@@ -129,7 +129,7 @@ export async function hardwareInventory(
       warnings.push(`sys.info failed: ${response.error ?? 'unknown error'}`);
     }
   } else {
-    warnings.push(...agentUnavailableHelp(session.agentDetail));
+    warnings.push(...agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
   sources.push({
     name: 'interrogation-agent',
@@ -206,7 +206,12 @@ export async function hardwareInventory(
   });
 
   const report: HardwareInventoryReport = {
-    success: true,
+    // False when the agent was never reached. The report is still returned and still
+    // useful — datasheet values, pin map, host enumeration — but nothing in it was
+    // measured on this unit, and a caller keying off `success` must not be told
+    // otherwise. Reporting success for a run that never contacted the target is how a
+    // busy serial port comes to look like a healthy interrogation.
+    success: session.agentPresent,
     port: session.port,
     sources,
     chip: {
@@ -634,7 +639,7 @@ export async function interfaceDiscovery(
       warnings.push(`sys.interfaces failed: ${response.error ?? 'unknown error'}`);
     }
   } else {
-    warnings.push(...agentUnavailableHelp(session.agentDetail));
+    warnings.push(...agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const family = session.family;
@@ -878,7 +883,7 @@ export async function i2cScan(options: I2CScanOptions = {}): Promise<I2CScanRepo
       frequencyHz,
       startAddress,
       endAddress,
-      agentUnavailableHelp(session.agentDetail)
+      agentUnavailableHelp(session.agentDetail, session.agentErrorKind)
     );
   }
 
@@ -1271,7 +1276,7 @@ export async function spiDiscovery(
   if (!pinCheck.ok) return failedSpi(options, pinCheck.errors);
 
   if (!session.agentPresent) {
-    return failedSpi(options, agentUnavailableHelp(session.agentDetail));
+    return failedSpi(options, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const raw: RawInterpretation[] = [];
@@ -1646,7 +1651,7 @@ export async function uartDiscovery(
   if (!pinCheck.ok) return failedUart(options, baud, mode, pinCheck.errors);
 
   if (!session.agentPresent) {
-    return failedUart(options, baud, mode, agentUnavailableHelp(session.agentDetail));
+    return failedUart(options, baud, mode, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const raw: RawInterpretation[] = [];
