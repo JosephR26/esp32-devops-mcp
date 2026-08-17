@@ -171,7 +171,8 @@ export function parseTestOutput(output: string): FirmwareTestResult {
  * and treating those as ESP32s invites flashing the wrong port.
  */
 const USB_SERIAL_BRIDGES: ReadonlyArray<{ pattern: RegExp; name: string }> = [
-  { pattern: /cp210\d/i, name: 'Silicon Labs CP210x' },
+  // CP2102 / CP2104 / CP2105, and the literal "CP210x" some hosts report.
+  { pattern: /cp21\d[\dx]?/i, name: 'Silicon Labs CP210x' },
   { pattern: /\bch(?:340|341|9102)\b/i, name: 'WCH CH34x' },
   { pattern: /ft(?:232|231|2232|di)/i, name: 'FTDI FT23x' },
   { pattern: /silicon\s*labs/i, name: 'Silicon Labs CP210x' },

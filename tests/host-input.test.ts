@@ -2,8 +2,10 @@
  * Host-side input handling: project path validation and USB-serial bridge
  * identification.
  *
- * Both were found broken by live use on Windows while every other test passed,
- * so these cases use realistic host strings rather than tidy synthetic ones.
+ * The cases come from tests/fixtures/host-strings.ts — strings real machines
+ * actually emit. Both bugs covered here passed every synthetic test and failed
+ * on first contact with a real host, so the fixture is the test data rather than
+ * something tidier invented alongside it.
  */
 
 import assert from 'node:assert/strict';
@@ -15,78 +17,71 @@ import {
   looksLikeEsp32Port,
   parseSerialPorts,
 } from '../src/utils/parser.js';
+import {
+  PORT_DESCRIPTIONS,
+  PROJECT_PATHS,
+  STORE_ALIAS_PYTHON3,
+} from './fixtures/host-strings.js';
 
-describe('project path validation', () => {
-  it('accepts an absolute Windows path with a drive colon', () => {
-    // The original validator rejected the colon outright, which made every
-    // absolute Windows path invalid and broke build, flash and inventory.
-    assert.equal(validateProjectPath('D:\\josep\\Documents\\GitHub\\project'), true);
-    assert.equal(validateProjectPath('C:/projects/firmware'), true);
-  });
+describe('project path validation against real host paths', () => {
+  for (const { path, valid, provenance, note } of PROJECT_PATHS) {
+    const label = path === '' ? '(empty string)' : JSON.stringify(path);
+    it(`${valid ? 'accepts' : 'rejects'} ${label} [${provenance}]${note ? ` — ${note}` : ''}`, () => {
+      assert.equal(validateProjectPath(path), valid);
+    });
+  }
 
-  it('accepts paths containing spaces and parentheses', () => {
-    assert.equal(validateProjectPath('C:\\Program Files (x86)\\thing'), true);
-  });
+  it('accepts every observed path', () => {
+    // Narrower than the sweep above and deliberately so: a path this project has
+    // actually used must never be rejected, whatever else changes.
+    const observed = PROJECT_PATHS.filter((p) => p.provenance === 'observed');
+    assert.ok(observed.length > 0, 'fixture should carry observed paths');
 
-  it('accepts an absolute POSIX path', () => {
-    assert.equal(validateProjectPath('/home/user/projects/firmware'), true);
-  });
-
-  it('accepts a relative path', () => {
-    assert.equal(validateProjectPath('firmware/interrogation-agent'), true);
-  });
-
-  it('rejects an empty or whitespace-only path', () => {
-    assert.equal(validateProjectPath(''), false);
-    assert.equal(validateProjectPath('   '), false);
-  });
-
-  it('rejects a colon outside the drive specifier', () => {
-    // NTFS alternate data stream.
-    assert.equal(validateProjectPath('C:\\projects\\file.txt:hidden'), false);
-    assert.equal(validateProjectPath('/home/user/we:ird'), false);
-  });
-
-  it('rejects directory traversal', () => {
-    assert.equal(validateProjectPath('C:\\projects\\..\\..\\Windows'), false);
-    assert.equal(validateProjectPath('../../etc'), false);
-    assert.equal(validateProjectPath('..'), false);
-  });
-
-  it('does not mistake a dotted name for traversal', () => {
-    assert.equal(validateProjectPath('C:\\projects\\my..project'), true);
-    assert.equal(validateProjectPath('/srv/..hidden/thing'), true);
-  });
-
-  it('rejects characters that are never legal in a path', () => {
-    for (const bad of ['a<b', 'a>b', 'a"b', 'a|b', 'a?b', 'a*b']) {
-      assert.equal(validateProjectPath(`C:\\projects\\${bad}`), false, bad);
+    for (const { path } of observed) {
+      assert.equal(validateProjectPath(path), true, `observed path rejected: ${path}`);
     }
   });
 });
 
-describe('USB-serial bridge identification', () => {
-  it('identifies the common ESP32 bridge chips', () => {
-    assert.equal(identifyUsbSerialBridge('USB-SERIAL CH340 (COM3)'), 'WCH CH34x');
-    assert.equal(identifyUsbSerialBridge('Silicon Labs CP210x USB to UART Bridge (COM5)'),
-      'Silicon Labs CP210x');
-    assert.equal(identifyUsbSerialBridge('USB JTAG/serial debug unit (COM7)'),
-      'ESP32 native USB (JTAG/serial)');
+describe('USB-serial bridge identification against real port descriptions', () => {
+  for (const { description, isEsp32, bridge, provenance, note } of PORT_DESCRIPTIONS) {
+    it(`${isEsp32 ? 'identifies' : 'declines'} ${JSON.stringify(description)} [${provenance}]${note ? ` — ${note}` : ''}`, () => {
+      assert.equal(identifyUsbSerialBridge(description), bridge);
+      assert.equal(looksLikeEsp32Port(description), isEsp32);
+    });
+  }
+
+  it('never claims a host-internal or virtual port is an ESP32', () => {
+    // The failure that mattered: a platform UART reported as a board. Any
+    // regression here can send a flash at the wrong device.
+    for (const { description, isEsp32 } of PORT_DESCRIPTIONS.filter((p) => !p.isEsp32)) {
+      assert.equal(
+        looksLikeEsp32Port(description),
+        false,
+        `wrongly identified as an ESP32: ${description}`
+      );
+      assert.equal(isEsp32, false);
+    }
   });
 
-  it('does not treat a host-internal UART as an ESP32', () => {
-    // The exact string Windows reports for the platform UARTs on an ARM64
-    // laptop. The previous heuristic matched a bare "uart" substring and
-    // claimed these were ESP32s.
-    assert.equal(identifyUsbSerialBridge('Qualcomm(R) UART Bus Device (COM1)'), null);
-    assert.equal(looksLikeEsp32Port('Qualcomm(R) UART Bus Device (COM1)'), false);
+  it('identifies a bridge for every port expected to carry one', () => {
+    for (const { description, bridge } of PORT_DESCRIPTIONS.filter((p) => p.isEsp32)) {
+      assert.equal(
+        identifyUsbSerialBridge(description),
+        bridge,
+        `bridge mismatch for: ${description}`
+      );
+    }
   });
 
   it('does not identify a bridge in an empty description', () => {
     assert.equal(identifyUsbSerialBridge(''), null);
   });
+});
 
+describe('serial port list parsing', () => {
   it('marks only real bridges when parsing a mixed port list', () => {
+    // The exact three ports this development machine enumerates.
     const output = [
       '1. COM1 - Qualcomm(R) UART Bus Device (COM1)',
       '2. COM2 - Qualcomm(R) UART Bus Device (COM2)',
@@ -101,6 +96,29 @@ describe('USB-serial bridge identification', () => {
       [['COM1', false], ['COM2', false], ['COM3', true]]
     );
     assert.equal(ports[2].bridge, 'WCH CH34x');
-    assert.equal(ports[0].bridge, undefined);
+    assert.equal(ports[0].bridge, undefined, 'no bridge field when none was identified');
+  });
+});
+
+describe('fixture integrity', () => {
+  it('records provenance for every entry', () => {
+    // The fixture is only worth having if 'observed' means observed. Guard the
+    // shape so an entry cannot be added without saying where it came from.
+    for (const entry of [...PORT_DESCRIPTIONS, ...PROJECT_PATHS]) {
+      assert.ok(
+        entry.provenance === 'observed' || entry.provenance === 'representative',
+        `missing or invalid provenance: ${JSON.stringify(entry)}`
+      );
+    }
+  });
+
+  it('keeps the Store alias case on record even though nothing asserts on it yet', () => {
+    // executePython hardcodes its candidate list, so this cannot be reproduced
+    // without injecting one. Keep the shape that broke fallback: present on PATH,
+    // so never ENOENT, but exits non-zero having run nothing.
+    assert.equal(STORE_ALIAS_PYTHON3.exitCode, 9009);
+    assert.notEqual(STORE_ALIAS_PYTHON3.exitCode, 0);
+    assert.match(STORE_ALIAS_PYTHON3.stdout, /Python was not found/);
+    assert.equal(STORE_ALIAS_PYTHON3.provenance, 'observed');
   });
 });
