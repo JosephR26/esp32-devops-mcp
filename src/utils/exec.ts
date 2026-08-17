@@ -55,7 +55,12 @@ export const DEFAULT_PYTHON_COMMANDS: readonly string[] = ['python3', 'python', 
 
 /**
  * Decides whether an interpreter candidate is usable.
- * Returns false — never throws — so every kind of unusability is handled alike.
+ *
+ * Implementations SHOULD report unusability by returning false rather than throwing,
+ * so that every kind of unusability is handled alike — which is what the default probe
+ * does. That is a convention, not an enforced guarantee: resolvePythonCommand does not
+ * catch, so a probe that throws propagates to the caller rather than being silently
+ * reinterpreted as "this interpreter is missing".
  */
 export type PythonProbe = (command: string) => Promise<boolean>;
 
