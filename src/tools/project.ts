@@ -177,13 +177,28 @@ export async function validateProject(projectPath?: string): Promise<ValidationR
   }
 
   const envMatches = [...iniContent.matchAll(/^\[env:([^\]]+)\]/gm)].map(m => m[1]);
-  const boardMatch = iniContent.match(/^board\s*=\s*(.+)$/m);
-  const frameworkMatch = iniContent.match(/^framework\s*=\s*(.+)$/m);
+
+  // Every `board =`, not just the first.
+  //
+  // A multi-environment project declares one board per environment, and matching only
+  // the first reported "3 environments, 1 board" — which reads as a misconfigured
+  // project rather than a parser that stopped early. Deduplicated because environments
+  // legitimately share a board, and comments are stripped so `board = esp32dev ; note`
+  // does not become part of the name.
+  const boards = [
+    ...new Set(
+      [...iniContent.matchAll(/^\s*board\s*=\s*(.+)$/gm)]
+        .map(m => m[1].split(/[;#]/)[0].trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  const frameworkMatch = iniContent.match(/^\s*framework\s*=\s*(.+)$/m);
 
   if (envMatches.length === 0) {
     issues.push({ severity: 'warning', message: 'No [env:*] sections found in platformio.ini' });
   }
-  if (!boardMatch) {
+  if (boards.length === 0) {
     issues.push({ severity: 'warning', message: 'No board configured in platformio.ini' });
   }
   if (!frameworkMatch) {
@@ -208,8 +223,8 @@ export async function validateProject(projectPath?: string): Promise<ValidationR
     issues,
     config: {
       environments: envMatches,
-      boards: boardMatch ? [boardMatch[1].trim()] : [],
-      framework: frameworkMatch ? frameworkMatch[1].trim() : '',
+      boards,
+      framework: frameworkMatch ? frameworkMatch[1].split(/[;#]/)[0].trim() : '',
     },
   };
 }
