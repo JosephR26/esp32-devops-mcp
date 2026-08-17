@@ -304,7 +304,7 @@ export async function componentIdentify(
     // rather than refused — but the result carries no physical evidence and the
     // engine caps its confidence accordingly.
     if (markings.length === 0) {
-      return noIdentification(agentUnavailableHelp(session.agentDetail).join(' '));
+      return noIdentification(agentUnavailableHelp(session.agentDetail, session.agentErrorKind).join(' '));
     }
     const report = identifyComponent({
       markings,
@@ -443,7 +443,7 @@ export async function componentProbe(
   if (!pinCheck.ok) return failedProbeReport(depth, iface, options, pinCheck.errors);
 
   if (!session.agentPresent) {
-    return failedProbeReport(depth, iface, options, agentUnavailableHelp(session.agentDetail));
+    return failedProbeReport(depth, iface, options, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const warnings: string[] = [...pinCheck.warnings];
@@ -974,7 +974,7 @@ export async function registerInspect(
   if (!pinCheck.ok) return failedRegisterReport(options, iface, pinCheck.errors);
 
   if (!session.agentPresent) {
-    return failedRegisterReport(options, iface, agentUnavailableHelp(session.agentDetail));
+    return failedRegisterReport(options, iface, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const report = hasProfileRegisters
@@ -1679,7 +1679,7 @@ export async function componentTest(
   if (!pinCheck.ok) return failedTestReport(profile.id, depth, pinCheck.errors);
 
   if (!session.agentPresent) {
-    return failedTestReport(profile.id, depth, agentUnavailableHelp(session.agentDetail));
+    return failedTestReport(profile.id, depth, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const ctx = buildProbeContext(session, options, profile);
@@ -1953,7 +1953,7 @@ export async function componentBenchmark(
   const pinCheck = pinChecksFor(session, options, iface);
   if (!pinCheck.ok) return failedBenchmarkReport(profile.id, pinCheck.errors);
   if (!session.agentPresent) {
-    return failedBenchmarkReport(profile.id, agentUnavailableHelp(session.agentDetail));
+    return failedBenchmarkReport(profile.id, agentUnavailableHelp(session.agentDetail, session.agentErrorKind));
   }
 
   const ctx = buildProbeContext(session, options, profile);

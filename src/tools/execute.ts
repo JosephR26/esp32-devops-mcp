@@ -97,7 +97,7 @@ export async function hardwareExecute(
   const session = await openSession({ ...(options.port !== undefined ? { port: options.port } : {}) });
 
   if (!session.agentPresent) {
-    return failedExecute(agentUnavailableHelp(session.agentDetail), repetitions);
+    return failedExecute(agentUnavailableHelp(session.agentDetail, session.agentErrorKind), repetitions);
   }
 
   const ctx: OperationContext = {
@@ -241,7 +241,7 @@ export async function pinCapabilityReport(
       'Chip family is UNKNOWN, so per-pin capabilities cannot be reported. Operations will ' +
         'still be attempted and validated by the agent itself, which checks pins on-target.'
     );
-    warnings.push(...(session.agentPresent ? [] : agentUnavailableHelp(session.agentDetail)));
+    warnings.push(...(session.agentPresent ? [] : agentUnavailableHelp(session.agentDetail, session.agentErrorKind)));
   }
 
   // What the running firmware says it currently has configured.

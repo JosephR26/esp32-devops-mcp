@@ -31,6 +31,12 @@ export interface InterrogationSession {
   /** True when the interrogation agent answered sys.ping. */
   agentPresent: boolean;
   agentDetail: string;
+  /**
+   * Why the agent was unreachable, when it was. Carried so callers can give a remedy
+   * that matches the actual failure — a busy port and missing firmware need opposite
+   * advice, and conflating them sends people to reflash working boards.
+   */
+  agentErrorKind?: string;
   family: Esp32Family;
   reproducibility: Partial<ReproducibilityRecord>;
 }
@@ -81,13 +87,22 @@ export async function openSession(options: SessionOptions = {}): Promise<Interro
 
   const ping = await transport.request<{ agentVersion?: string }>('sys.ping', {}, { timeoutMs: 4000 });
   const agentPresent = ping.ok;
+  const agentErrorKind = agentPresent ? undefined : ping.errorKind;
+
+  // The fallback wording must not assume missing firmware. A port held by a serial
+  // monitor never reaches the target at all, and saying "the agent did not respond"
+  // there blames a board that was never asked anything.
   const agentDetail = agentPresent
     ? `Interrogation agent ${ping.data?.agentVersion ?? 'present'} responded on ${
         port.value ?? 'the configured port'
       }.`
     : ping.error ??
-      'The interrogation agent did not respond. Flash firmware/interrogation-agent to the ' +
-        'target, or pass a port that has it running.';
+      (agentErrorKind === 'PORT_UNAVAILABLE'
+        ? `The serial port ${port.value ?? ''} could not be opened, so the target was never contacted.`.replace('  ', ' ')
+        : agentErrorKind === 'NO_TRANSPORT'
+          ? 'No serial transport is available on this host, so the target was never contacted.'
+          : 'The interrogation agent did not respond. Flash firmware/interrogation-agent to the ' +
+            'target, or pass a port that has it running.');
 
   const reproducibility = agentPresent
     ? await captureReproducibilityFacts(transport)
@@ -95,7 +110,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Interro
 
   const family = normaliseFamily(reproducibility.hardware?.chip?.value ?? null);
 
-  return { transport, port, agentPresent, agentDetail, family, reproducibility };
+  return { transport, port, agentPresent, agentDetail, agentErrorKind, family, reproducibility };
 }
 
 export interface PinCheckResult {
@@ -164,14 +179,48 @@ export function coerceDepth(value: unknown, fallback: InterrogationDepth = 'STAN
     : fallback;
 }
 
-/** Standard "no agent" explanation appended to reports that could not run. */
-export function agentUnavailableHelp(detail: string): string[] {
-  return [
-    detail,
-    'Physical interrogation requires the interrogation agent firmware on the target.',
-    'Build and flash it with: pio run -e esp32dev -t upload (from firmware/interrogation-agent/).',
-    'It also requires pyserial on the host: pip install -r requirements.txt',
-  ];
+/**
+ * Explanation appended to reports that could not reach the target.
+ *
+ * The remedy depends on WHY the agent was unreachable, and getting it wrong is
+ * expensive: telling someone to reflash when a serial monitor was holding the port
+ * sends them to rewrite a working board. The transport already distinguishes these
+ * cases, so the advice must too.
+ *
+ * `kind` is optional so callers with no error kind to hand still compile; without one
+ * the generic firmware advice remains the safest default.
+ */
+export function agentUnavailableHelp(detail: string, kind?: string): string[] {
+  const lines = [detail];
+
+  switch (kind) {
+    case 'PORT_UNAVAILABLE':
+      lines.push(
+        'The serial port could not be opened, so nothing was asked of the target.',
+        'Something else holds it: a serial monitor, another interrogation still in flight, or a stale process.',
+        'Close whatever holds the port and retry. The firmware on the target is not implicated by this error.'
+      );
+      break;
+
+    case 'NO_TRANSPORT':
+      lines.push(
+        'The host cannot open serial ports at all: pyserial is missing.',
+        'Install it with: pip install -r requirements.txt',
+        'The firmware on the target is not implicated by this error.'
+      );
+      break;
+
+    case 'AGENT_NOT_PRESENT':
+    case 'TIMEOUT':
+    default:
+      lines.push(
+        'Physical interrogation requires the interrogation agent firmware on the target.',
+        'Build and flash it with: pio run -e esp32dev -t upload (from firmware/interrogation-agent/).',
+        'It also requires pyserial on the host: pip install -r requirements.txt'
+      );
+  }
+
+  return lines;
 }
 
 /** Confidence for a value that came from the agent rather than a datasheet. */
