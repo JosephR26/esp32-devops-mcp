@@ -27,7 +27,18 @@ export function validateBaudRate(rate: number): boolean {
 }
 
 /**
- * Validate project path
+ * Validate project path.
+ *
+ * Note the colon is NOT rejected outright. `<>:"|?*` is the set of characters
+ * illegal in a Windows *filename*, and applying it to a whole *path* rejected
+ * every absolute Windows path, since `D:\projects\firmware` must contain a drive
+ * colon. A colon is therefore allowed in exactly one position — the drive
+ * separator — and rejected everywhere else (which also blocks NTFS alternate data
+ * streams such as `file.txt:hidden`).
+ *
+ * Spaces and parentheses are permitted: `C:\Program Files (x86)\...` is an
+ * ordinary path, and arguments reach child processes through execFile argv arrays
+ * rather than a shell, so they are not shell-interpolated.
  */
 export function validateProjectPath(path: string): boolean {
   // Must not be empty
@@ -35,9 +46,20 @@ export function validateProjectPath(path: string): boolean {
     return false;
   }
 
-  // Must not contain dangerous characters
-  const dangerousPattern = /[<>:"|?*]/;
-  if (dangerousPattern.test(path)) {
+  // Characters that are never legal in a path segment, plus NUL.
+  // eslint-disable-next-line no-control-regex
+  if (/[<>"|?*\u0000]/.test(path)) {
+    return false;
+  }
+
+  // Strip a leading drive specifier, then no colon may remain.
+  const withoutDrive = /^[a-zA-Z]:/.test(path) ? path.slice(2) : path;
+  if (withoutDrive.includes(':')) {
+    return false;
+  }
+
+  // Reject directory traversal: a literal `..` segment, on either separator.
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(withoutDrive)) {
     return false;
   }
 
