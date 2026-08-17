@@ -17,6 +17,7 @@
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { executePython, fileExists } from '../utils/exec.js';
+import { withPortLock } from '../utils/port-lock.js';
 import { validateSerialPort, validateBaudRate } from '../utils/validation.js';
 import type {
   HardwareTransport,
@@ -125,11 +126,23 @@ export class PythonBridgeTransport implements HardwareTransport {
       payload,
     ];
 
-    // Give the Python process headroom over the on-wire timeout so its own
-    // structured timeout error wins over a hard process kill.
-    const exec = await executePython(this.scriptPath, args, {
-      timeout: timeoutMs + 5000,
-    });
+    // Hold the cross-process port lock for the exchange.
+    //
+    // The serial port is exclusive at the OS level, and this project now has more than
+    // one process wanting it: the MCP server and the control panel. Without this, the
+    // loser of that race gets a PermissionError that the tools report as a
+    // datasheet-only answer — a collision that looks like a hardware fault.
+    //
+    // The lock is only held for the duration of one bridge exchange, so a long-running
+    // caller cannot starve a short one.
+    //
+    // Give the Python process headroom over the on-wire timeout so its own structured
+    // timeout error wins over a hard process kill.
+    const exec = await withPortLock(
+      this.port,
+      () => executePython(this.scriptPath, args, { timeout: timeoutMs + 5000 }),
+      { waitMs: timeoutMs + 10000, owner: `transport ${op}` }
+    );
     const durationMs = Date.now() - started;
     const raw = exec.stdout || '';
 

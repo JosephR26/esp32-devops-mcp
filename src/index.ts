@@ -26,6 +26,7 @@ import * as otaTools from './tools/ota.js';
 import * as hardwareTools from './tools/hardware.js';
 import * as componentTools from './tools/component.js';
 import * as executeTools from './tools/execute.js';
+import { buildSummary } from './utils/build-info.js';
 
 /**
  * MCP Server instance
@@ -1629,7 +1630,10 @@ async function main() {
   await server.connect(transport);
 
   console.error('ESP32 DevOps MCP Server started');
-  console.error('Version: 1.3.0');
+  // Report the build that is RUNNING, not a hardcoded string. A compiled server keeps
+  // serving the dist it loaded at startup, so after a rebuild the process can still be
+  // executing old code — and an already-fixed bug reproduces, looking like a new one.
+  console.error(`Build: ${buildSummary()}`);
   console.error(`Tools registered: ${tools.length}`);
   console.error('Toolkit path:', process.env.FIRMWARE_TOOLKIT_PATH || '[NOT SET - required for benchmarking/testing features]');
   console.error('Hardware interrogation requires the agent firmware (firmware/interrogation-agent/) and pyserial.');

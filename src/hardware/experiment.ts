@@ -35,9 +35,23 @@ import { matchBytePattern, mean, stdDev, toHex } from './patterns.js';
 import { executeProbe, type ProbeContext } from './probe.js';
 import { executeOperation, type OperationContext } from './operations.js';
 import { findProbe } from './registry.js';
+import { buildSummary } from '../utils/build-info.js';
 
 /** Version reported in reproducibility records. Kept in step with package.json. */
 export const MCP_VERSION = '1.3.0';
+
+/**
+ * What actually goes into a reproducibility record: the RUNNING build, not the declared
+ * version alone.
+ *
+ * A compiled server keeps serving the dist it loaded at startup, so after a rebuild the
+ * process can still be executing old code — and a result carrying only "1.3.0" gives no
+ * way to tell. With the git SHA and build age attached, a stale process is visible in
+ * any captured result, including one read back months later.
+ *
+ * Computed once: the build cannot change under a running process.
+ */
+const RUNNING_BUILD = buildSummary();
 
 /** Upper bound on repetitions, so a REPEAT phase cannot run unbounded. */
 export const MAX_REPETITIONS = 50;
@@ -105,7 +119,7 @@ export function buildReproducibility(
   profile?: ComponentProfile | null
 ): ReproducibilityRecord {
   return {
-    mcpVersion: MCP_VERSION,
+    mcpVersion: RUNNING_BUILD,
     hardware: {
       port: partial.hardware?.port ?? unknownValue<string>('Port not recorded'),
       chip: partial.hardware?.chip ?? unknownValue<string>('Chip not identified'),

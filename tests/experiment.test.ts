@@ -199,7 +199,11 @@ describe('experiment lifecycle', () => {
     });
 
     const record = report.reproducibility;
-    assert.equal(record.mcpVersion, MCP_VERSION);
+    // The record now carries the RUNNING build — version, git SHA and build age —
+    // not a bare version string, so a stale process is visible in any captured
+    // result, including one read back months later.
+    assert.ok(record.mcpVersion.includes(MCP_VERSION),
+      `reproducibility should record the running build, got: ${record.mcpVersion}`);
     assert.equal(record.hardware.chip.value, 'ESP32');
     assert.equal(record.hardware.chipRevision.value, '3');
     assert.equal(record.hardware.mac.value, '24:6F:28:AA:BB:CC');
@@ -344,7 +348,11 @@ describe('reproducibility records', () => {
     const record = buildReproducibility({ interface: 'I2C' });
     assert.equal(record.hardware.chip.known, false);
     assert.equal(record.firmware.agentVersion.known, false);
-    assert.equal(record.mcpVersion, MCP_VERSION);
+    // The record now carries the RUNNING build — version, git SHA and build age —
+    // not a bare version string, so a stale process is visible in any captured
+    // result, including one read back months later.
+    assert.ok(record.mcpVersion.includes(MCP_VERSION),
+      `reproducibility should record the running build, got: ${record.mcpVersion}`);
   });
 
   it('reports UNKNOWN facts when the agent cannot answer sys.info', async () => {
