@@ -33,7 +33,9 @@
       "mcp__esp32-devops__esp32_component_capabilities",
       "mcp__esp32-devops__esp32_component_test",
       "mcp__esp32-devops__esp32_component_benchmark",
-      "mcp__esp32-devops__esp32_hardware_experiment"
+      "mcp__esp32-devops__esp32_hardware_experiment",
+      "mcp__esp32-devops__esp32_hardware_execute",
+      "mcp__esp32-devops__esp32_pin_capabilities"
     ]
   }
 }

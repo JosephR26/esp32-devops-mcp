@@ -495,13 +495,10 @@ export const MCP4725_PROFILE: ComponentProfile = {
 
   identification: [
     { id: 'mcp4725.address', description: 'Responds in the 0x60-0x67 DAC address block', weight: 0.2, match: { kind: 'I2C_ADDRESS', addresses: [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67] } },
-    {
-      id: 'mcp4725.status-format',
-      description: 'Read returns a 5-byte status block whose first byte has RDY set and PD bits in the documented positions',
-      weight: 0.6,
-      match: { kind: 'PROBE_RESPONSE', probeId: 'mcp4725.read_status', pattern: '?? ?? ?? ?? ??' },
-      reference: 'MCP4725 datasheet DS22039 §6.2',
-    },
+    // A plain read returns five bytes whose values are entirely device state,
+    // with no fixed signature to match against. There is deliberately no
+    // response-based rule here: inventing one that matches any 5-byte reply
+    // would manufacture confidence out of nothing.
   ],
 
   registers: [
@@ -574,6 +571,8 @@ export const MCP4725_PROFILE: ComponentProfile = {
     'The DAC output value cannot be verified over the bus alone — confirming it needs an external voltage measurement.',
     'This profile declares no EEPROM write probe. Writing the non-volatile setting is out of scope for interrogation.',
     'Address alone cannot distinguish an MCP4725 from other devices in the 0x60-0x67 range.',
+    'No bus response identifies this part: the readable bytes are pure device state with no ' +
+      'fixed signature. Expect LOW identification confidence and confirm by markings.',
   ],
 
   documentation: [{ title: 'MCP4725 12-Bit DAC with EEPROM Memory', section: 'DS22039' }],
@@ -725,13 +724,8 @@ export const SSD1306_PROFILE: ComponentProfile = {
 
   identification: [
     { id: 'ssd1306.address', description: 'Responds at I2C address 0x3C or 0x3D', weight: 0.25, match: { kind: 'I2C_ADDRESS', addresses: [0x3c, 0x3d] } },
-    {
-      id: 'ssd1306.status-byte',
-      description: 'Status read returns a byte whose bit 6 reflects the display on/off state',
-      weight: 0.4,
-      match: { kind: 'PROBE_RESPONSE', probeId: 'ssd1306.read_status', pattern: '??' },
-      reference: 'SSD1306 datasheet Rev 1.1 §8.1.5',
-    },
+    // The single readable status byte has no fixed signature — every bit is
+    // state. No response-based rule can distinguish this part over the bus.
   ],
 
   registers: [
@@ -794,6 +788,8 @@ export const SSD1306_PROFILE: ComponentProfile = {
     'The SSD1306 is fundamentally a write-oriented device: only one status byte can be read back.',
     'Display content cannot be read over I2C, so rendering correctness cannot be verified electrically.',
     'SSD1315 and several clones share the address and command set and are indistinguishable over the bus.',
+    'The single status byte carries no fixed signature, so identification rests on the address ' +
+      'alone and cannot rise above LOW confidence from the bus.',
     'Over SPI the controller drives no MISO line, so SPI discovery cannot detect it by response.',
   ],
 
@@ -818,12 +814,8 @@ export const EEPROM_24CXX_PROFILE: ComponentProfile = {
 
   identification: [
     { id: 'eeprom24.address', description: 'Responds in the 0x50-0x57 EEPROM address block', weight: 0.3, match: { kind: 'I2C_ADDRESS', addresses: [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57] } },
-    {
-      id: 'eeprom24.readable',
-      description: 'A random read at word address 0 returns data',
-      weight: 0.35,
-      match: { kind: 'PROBE_RESPONSE', probeId: 'eeprom24.read_first_bytes', pattern: '??' },
-    },
+    // Stored contents are arbitrary, so no response pattern identifies the part.
+    // Address is the only bus-visible evidence, and it is weak on its own.
   ],
 
   registers: [],
@@ -874,7 +866,10 @@ export const EEPROM_24CXX_PROFILE: ComponentProfile = {
   limitations: [
     'Device capacity cannot be determined by reading alone without address-wrap probing, which this profile does not perform.',
     'Parts with 8-bit word addressing will misinterpret the two-byte address used here; a returned block of 0xFF may indicate an addressing-width mismatch rather than an erased device.',
-    'This profile deliberately declares no write probe. Writing EEPROM is out of scope for interrogation.',
+    'This profile declares no write probe by default; use esp32_register_inspect `writes` or ' +
+      'esp32_hardware_execute to write deliberately.',
+    'Stored contents are arbitrary, so no response pattern identifies the part — identification ' +
+      'rests on the address block alone.',
   ],
 
   documentation: [{ title: 'AT24C32/64 Datasheet' }, { title: 'Microchip 24LC256 Datasheet' }],

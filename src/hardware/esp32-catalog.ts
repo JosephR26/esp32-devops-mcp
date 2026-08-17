@@ -235,3 +235,237 @@ export function reservedPins(family: Esp32Family): number[] {
 export function inputOnlyPins(family: Esp32Family): number[] {
   return family === 'ESP32' ? [34, 35, 36, 37, 38, 39] : [];
 }
+
+/**
+ * Strapping pins. These are usable, but their level at reset selects the boot
+ * mode, so driving them can prevent the board rebooting normally.
+ *
+ * Reported as a warning, never a refusal — a strapping pin is a real pin and an
+ * experiment may legitimately need it.
+ */
+export function strappingPins(family: Esp32Family): number[] {
+  switch (family) {
+    case 'ESP32':
+      return [0, 2, 5, 12, 15];
+    case 'ESP32-S2':
+      return [0, 45, 46];
+    case 'ESP32-S3':
+      return [0, 3, 45, 46];
+    case 'ESP32-C3':
+      return [2, 8, 9];
+    case 'ESP32-C6':
+      return [4, 5, 8, 9, 15];
+    case 'ESP32-H2':
+      return [2, 3, 8, 9, 25];
+    case 'ESP8266':
+      return [0, 2, 15];
+    default:
+      return [];
+  }
+}
+
+/** Pins wired to the on-board USB-serial bridge or native USB. */
+export function usbPins(family: Esp32Family): number[] {
+  switch (family) {
+    case 'ESP32-S2':
+    case 'ESP32-S3':
+      return [19, 20];
+    case 'ESP32-C3':
+    case 'ESP32-C6':
+    case 'ESP32-H2':
+      return [12, 13];
+    default:
+      return [];
+  }
+}
+
+/** ADC-capable pins per family, from the datasheet pin multiplexing tables. */
+export function adcPins(family: Esp32Family): number[] {
+  switch (family) {
+    case 'ESP32':
+      // ADC1: 32-39. ADC2: 0,2,4,12-15,25-27 (unusable while Wi-Fi is active).
+      return [32, 33, 34, 35, 36, 37, 38, 39, 0, 2, 4, 12, 13, 14, 15, 25, 26, 27];
+    case 'ESP32-S2':
+    case 'ESP32-S3':
+      return Array.from({ length: 20 }, (_, i) => i + 1);
+    case 'ESP32-C3':
+      return [0, 1, 2, 3, 4, 5];
+    case 'ESP32-C6':
+      return [0, 1, 2, 3, 4, 5, 6];
+    case 'ESP32-H2':
+      return [1, 2, 3, 4, 5];
+    case 'ESP8266':
+      return [17]; // A0
+    default:
+      return [];
+  }
+}
+
+/** DAC-capable pins per family. */
+export function dacPins(family: Esp32Family): number[] {
+  switch (family) {
+    case 'ESP32':
+      return [25, 26];
+    case 'ESP32-S2':
+      return [17, 18];
+    default:
+      return [];
+  }
+}
+
+/** Capacitive-touch-capable pins per family. */
+export function touchPins(family: Esp32Family): number[] {
+  switch (family) {
+    case 'ESP32':
+      return [0, 2, 4, 12, 13, 14, 15, 27, 32, 33];
+    case 'ESP32-S2':
+    case 'ESP32-S3':
+      return Array.from({ length: 14 }, (_, i) => i + 1);
+    default:
+      return [];
+  }
+}
+
+/** Highest valid GPIO number for a family. */
+export function maxGpio(family: Esp32Family): number {
+  switch (family) {
+    case 'ESP32':
+      return 39;
+    case 'ESP32-S2':
+      return 46;
+    case 'ESP32-S3':
+      return 48;
+    case 'ESP32-C3':
+      return 21;
+    case 'ESP32-C6':
+      return 30;
+    case 'ESP32-H2':
+      return 27;
+    case 'ESP8266':
+      return 17;
+    default:
+      return 48; // Permissive when the family is unknown; the agent still checks.
+  }
+}
+
+/** What a single physical pin can actually do on this chip. */
+export interface PinCapability {
+  gpio: number;
+  /** False when the pin does not exist on this family or is wired to flash. */
+  usable: boolean;
+  /** Reason the pin is unusable, when it is. */
+  unusableReason?: string;
+  digitalInput: boolean;
+  digitalOutput: boolean;
+  /** Output-capable peripherals all require digitalOutput. */
+  pwm: boolean;
+  adc: boolean;
+  dac: boolean;
+  touch: boolean;
+  /** Pin can carry any peripheral signal through the GPIO matrix. */
+  matrixRoutable: boolean;
+  /** Advisory notes — strapping, USB, JTAG, etc. Never a refusal. */
+  notes: string[];
+}
+
+/**
+ * Full pin capability map for a family.
+ *
+ * This is what makes generic experimentation safe without a component profile:
+ * validation is against what the silicon can do, not against a catalogue of
+ * anticipated components.
+ */
+export function pinCapabilities(family: Esp32Family): PinCapability[] {
+  const max = maxGpio(family);
+  const reserved = reservedPins(family);
+  const inputOnly = inputOnlyPins(family);
+  const strapping = strappingPins(family);
+  const usb = usbPins(family);
+  const adc = adcPins(family);
+  const dac = dacPins(family);
+  const touch = touchPins(family);
+
+  // Gaps in the GPIO numbering, per family pinout tables.
+  const nonExistent = (gpio: number): boolean => {
+    if (family === 'ESP32') return gpio === 20 || (gpio >= 24 && gpio <= 24) || gpio === 28 || gpio === 29 || gpio === 30 || gpio === 31;
+    if (family === 'ESP32-S3') return gpio === 22 || gpio === 23 || gpio === 24 || gpio === 25;
+    return false;
+  };
+
+  const pins: PinCapability[] = [];
+
+  for (let gpio = 0; gpio <= max; gpio++) {
+    const notes: string[] = [];
+
+    if (nonExistent(gpio)) {
+      pins.push({
+        gpio,
+        usable: false,
+        unusableReason: `GPIO${gpio} is not bonded out on ${family}`,
+        digitalInput: false,
+        digitalOutput: false,
+        pwm: false,
+        adc: false,
+        dac: false,
+        touch: false,
+        matrixRoutable: false,
+        notes,
+      });
+      continue;
+    }
+
+    if (reserved.includes(gpio)) {
+      pins.push({
+        gpio,
+        usable: false,
+        unusableReason:
+          `GPIO${gpio} is wired to SPI flash/PSRAM on ${family}. Driving it corrupts execution.`,
+        digitalInput: false,
+        digitalOutput: false,
+        pwm: false,
+        adc: false,
+        dac: false,
+        touch: false,
+        matrixRoutable: false,
+        notes,
+      });
+      continue;
+    }
+
+    const isInputOnly = inputOnly.includes(gpio);
+    if (isInputOnly) notes.push('Input-only: no output driver, no pull-up/pull-down.');
+    if (strapping.includes(gpio)) {
+      notes.push(
+        'Strapping pin: its level at reset selects boot mode. Usable, but holding it may ' +
+          'prevent a normal reboot.'
+      );
+    }
+    if (usb.includes(gpio)) notes.push('Wired to native USB / USB-Serial-JTAG on this family.');
+    if (family === 'ESP32' && [12, 13, 14, 15].includes(gpio)) {
+      notes.push('Default JTAG pin; free to use unless a debugger is attached.');
+    }
+    if (family === 'ESP32' && adc.includes(gpio) && gpio < 32) {
+      notes.push('ADC2 channel: unavailable while Wi-Fi is active.');
+    }
+
+    pins.push({
+      gpio,
+      usable: true,
+      digitalInput: true,
+      digitalOutput: !isInputOnly,
+      pwm: !isInputOnly,
+      adc: adc.includes(gpio),
+      dac: dac.includes(gpio),
+      touch: touch.includes(gpio),
+      matrixRoutable: !isInputOnly,
+      notes,
+    });
+  }
+
+  return pins;
+}
+
+/** Capability record for one pin, or null when the pin does not exist. */
+export function pinCapability(family: Esp32Family, gpio: number): PinCapability | null {
+  return pinCapabilities(family).find((p) => p.gpio === gpio) ?? null;
+}

@@ -324,17 +324,52 @@ describe('esp32_spi_discovery', () => {
     assert.ok(report.raw.length > 0);
   });
 
-  it('rejects an unknown probe profile rather than sending arbitrary bytes', async () => {
+  it('rejects an unknown preset name but points at the arbitrary-bytes path', async () => {
     useMock(NRF24_SPI_HANDLERS);
     const report = await spiDiscovery({
       port: '/dev/ttyUSB0',
       cs: 5,
-      profiles: ['SEND_WHATEVER_I_WANT'],
+      profiles: ['NOT_A_PRESET'],
     });
 
     assert.equal(report.success, false);
-    assert.match(report.errors.join(' '), /Unknown SPI probe profile/);
-    assert.match(report.errors.join(' '), /not supported by design/);
+    assert.match(report.errors.join(' '), /Unknown SPI preset/);
+    assert.match(report.errors.join(' '), /pass them directly as `tx`/);
+  });
+
+  it('clocks arbitrary bytes with no preset and no component profile', async () => {
+    const transport = useMock(NRF24_SPI_HANDLERS);
+    const report = await spiDiscovery({
+      port: '/dev/ttyUSB0',
+      cs: 5,
+      sclk: 18,
+      miso: 19,
+      mosi: 23,
+      tx: [0xde, 0xad, 0xbe, 0xef],
+    });
+
+    assert.equal(report.success, true);
+    const arbitrary = report.probes.find((p) => p.probeId === 'ARBITRARY')!;
+    assert.ok(arbitrary, 'the caller-supplied transfer ran');
+    assert.deepEqual(arbitrary.tx, [0xde, 0xad, 0xbe, 0xef]);
+
+    const sent = transport.calls.find((c) => c.op === 'spi.transfer')!;
+    assert.deepEqual(sent.params.tx, [0xde, 0xad, 0xbe, 0xef], 'bytes passed through unaltered');
+  });
+
+  it('does not run presets when explicit tx bytes are supplied', async () => {
+    useMock(NRF24_SPI_HANDLERS);
+    const report = await spiDiscovery({
+      port: '/dev/ttyUSB0',
+      cs: 5,
+      sclk: 18,
+      miso: 19,
+      mosi: 23,
+      tx: [0x01],
+    });
+
+    assert.equal(report.probes.length, 1);
+    assert.equal(report.probes[0].probeId, 'ARBITRARY');
   });
 
   it('flags an all-0xFF response as degenerate rather than as data', async () => {
@@ -425,11 +460,30 @@ describe('esp32_uart_discovery', () => {
     assert.equal(transport.countOf('uart.writeRead'), 0);
   });
 
-  it('refuses ACTIVE mode without a named component', async () => {
+  it('refuses ACTIVE mode only when given nothing to send', async () => {
     useMock(NEO6M_UART_HANDLERS);
     const report = await uartDiscovery({ port: '/dev/ttyUSB0', rx: 16, mode: 'ACTIVE' });
     assert.equal(report.success, false);
-    assert.match(report.errors.join(' '), /ACTIVE mode requires a `component`/);
+    assert.match(report.errors.join(' '), /ACTIVE mode needs something to send/);
+  });
+
+  it('transmits arbitrary bytes in ACTIVE mode with no component profile', async () => {
+    const transport = useMock({
+      ...NEO6M_UART_HANDLERS,
+      'uart.writeRead': () => ({ data: { bytes: [0x4f, 0x4b], durationUs: 900, complete: true } }),
+    });
+
+    const report = await uartDiscovery({
+      port: '/dev/ttyUSB0',
+      rx: 16,
+      tx: 17,
+      mode: 'ACTIVE',
+      transmit: [0x41, 0x54, 0x0d],
+    });
+
+    assert.equal(report.success, true);
+    const sent = transport.calls.find((c) => c.op === 'uart.writeRead')!;
+    assert.deepEqual(sent.params.write, [0x41, 0x54, 0x0d], 'bytes passed through unaltered');
   });
 
   it('does not treat silence as proof of an idle bus', async () => {

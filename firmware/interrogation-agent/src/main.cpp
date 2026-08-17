@@ -11,12 +11,16 @@
  * ------------
  * - Passive at boot. No bus is initialised and no GPIO is driven until a request
  *   explicitly names the pins to use.
- * - Read-first. There is no arbitrary register-write operation. `i2c.writeRead`
- *   exists because addressed reads and documented identification commands
- *   require emitting bytes; the host layer gates it behind declared, justified
- *   probes.
+ * - General purpose. Arbitrary bytes may be written to any bus and any pin the
+ *   caller names, because that is what makes the ESP32 usable as an
+ *   experimentation instrument. The agent does not know or care what is
+ *   attached, and it maintains no list of permitted commands.
+ * - Refusals are physical. An operation is rejected because a pin does not
+ *   exist, is wired to flash, cannot drive an output, or a parameter is out of
+ *   the silicon's range — never because the operation was unanticipated.
  * - No flash access, no NVS access, no credential access, no firmware readout.
- * - Every operation is bounded by an explicit length and timeout.
+ * - Every operation is bounded by an explicit length and timeout so a single
+ *   request cannot hang the agent.
  *
  * Blocking is confined to a single request handler; loop() itself never blocks
  * on delay() and the agent returns to idle between requests.
@@ -32,14 +36,20 @@
 #include <esp_ota_ops.h>
 
 #ifndef AGENT_VERSION
-#define AGENT_VERSION "1.0.0"
+#define AGENT_VERSION "2.0.0"
 #endif
 
-static const size_t kRequestCapacity = 4096;
+static const size_t kRequestCapacity = 8192;
 static const size_t kMaxPayloadBytes = 512;
+static const size_t kMaxSamples = 1024;
 static const uint32_t kMaxCaptureMs = 30000;
 
 static String g_line;
+
+/** LEDC channel bookkeeping so PWM can be started and stopped per pin. */
+static const int kMaxPwmChannels = 8;
+static int g_pwmPins[kMaxPwmChannels];
+static bool g_pwmActive[kMaxPwmChannels];
 
 // ---------------------------------------------------------------------------
 // Response helpers
@@ -201,6 +211,60 @@ static void opSysInterfaces(long id) {
   sendOk(id, data);
 }
 
+/**
+ * Report exactly which operations this agent build implements.
+ *
+ * The host uses this to tell the caller what is genuinely available rather than
+ * guessing, so a capability the firmware lacks is reported as unavailable
+ * instead of failing obscurely at call time.
+ */
+static void opSysCapabilities(long id) {
+  JsonDocument data;
+  data["agentVersion"] = AGENT_VERSION;
+
+  JsonArray ops = data["operations"].to<JsonArray>();
+  static const char *kOps[] = {
+      "sys.ping",       "sys.info",         "sys.interfaces",       "sys.capabilities",
+      "i2c.scan",       "i2c.read",         "i2c.write",            "i2c.writeRead",
+      "spi.transfer",   "uart.listen",      "uart.writeRead",       "gpio.read",
+      "gpio.configure", "gpio.write",       "gpio.pulse",           "gpio.sample",
+      "gpio.measurePulse", "gpio.measureFrequency", "gpio.waitEdge", "gpio.stimulusCapture",
+      "adc.read",       "pwm.start",        "pwm.stop",
+  };
+  for (const char *name : kOps) ops.add(name);
+
+  JsonObject limits = data["limits"].to<JsonObject>();
+  limits["maxPayloadBytes"] = kMaxPayloadBytes;
+  limits["maxSamples"] = kMaxSamples;
+  limits["maxCaptureMs"] = kMaxCaptureMs;
+  limits["maxRequestBytes"] = kRequestCapacity;
+  limits["maxPwmChannels"] = kMaxPwmChannels;
+  limits["maxSampledPins"] = 16;
+
+  // Capabilities this build does NOT provide, stated rather than left to be
+  // discovered by a failing call.
+  JsonArray unavailable = data["unavailable"].to<JsonArray>();
+  JsonObject dac = unavailable.add<JsonObject>();
+  dac["capability"] = "dac.write";
+  dac["reason"] = "Not implemented by this agent build.";
+  JsonObject touch = unavailable.add<JsonObject>();
+  touch["capability"] = "touch.read";
+  touch["reason"] = "Not implemented by this agent build.";
+  JsonObject i2s = unavailable.add<JsonObject>();
+  i2s["capability"] = "i2s.*";
+  i2s["reason"] = "Not implemented; I2S needs continuous DMA streaming the JSON link cannot carry.";
+  JsonObject logic = unavailable.add<JsonObject>();
+  logic["capability"] = "high-speed logic capture";
+  logic["reason"] =
+      "GPIO sampling is a polling loop, so the sample rate is bounded well below the pin's "
+      "switching limit. Use an external logic analyser for fast signals.";
+  JsonObject can = unavailable.add<JsonObject>();
+  can["capability"] = "can.* (TWAI)";
+  can["reason"] = "Not implemented; also requires an external CAN transceiver.";
+
+  sendOk(id, data);
+}
+
 // ---------------------------------------------------------------------------
 // i2c.*
 // ---------------------------------------------------------------------------
@@ -328,6 +392,57 @@ static void opI2cRead(long id, JsonObject params) {
   sendOk(id, data);
 }
 
+/**
+ * Write arbitrary bytes with no read phase.
+ *
+ * This is the general write primitive, and it deliberately places no meaning on
+ * the payload: a register write, a mode command, a bank select and a byte
+ * sequence nobody has documented are all the same operation here. The agent
+ * reports what the bus did; interpreting it is the caller's job.
+ */
+static void opI2cWrite(long id, JsonObject params) {
+  TwoWire *bus = nullptr;
+  if (!i2cBegin(id, params, &bus)) return;
+
+  int address = params["address"] | -1;
+  JsonArray write = params["write"].as<JsonArray>();
+
+  if (address < 0 || address > 0x7F) {
+    sendError(id, "DEVICE_ERROR", "address must be 0x00..0x7F");
+    return;
+  }
+  if (write.isNull() || write.size() == 0 || write.size() > kMaxPayloadBytes) {
+    sendError(id, "DEVICE_ERROR", "write must be a byte array of 1..512 bytes");
+    return;
+  }
+
+  uint32_t t0 = micros();
+  bus->beginTransmission((uint8_t)address);
+  size_t queued = 0;
+  for (JsonVariant v : write) queued += bus->write((uint8_t)(v.as<int>() & 0xFF));
+  uint8_t rc = bus->endTransmission();
+  uint32_t elapsed = micros() - t0;
+
+  JsonDocument data;
+  data["address"] = address;
+  data["bytesQueued"] = queued;
+  data["writeAck"] = (rc == 0);
+  data["writeStatus"] = rc;
+  data["durationUs"] = elapsed;
+  data["bytes"].to<JsonArray>();  // No read phase; keep the shape consistent.
+  switch (rc) {
+    case 0: data["statusText"] = "ACK"; break;
+    case 1: data["statusText"] = "data too long for the transmit buffer"; break;
+    case 2: data["statusText"] = "NACK on address"; break;
+    case 3: data["statusText"] = "NACK on data"; break;
+    case 4: data["statusText"] = "other bus error"; break;
+    case 5: data["statusText"] = "timeout"; break;
+    default: data["statusText"] = "unknown"; break;
+  }
+  // A NACK is an observation about the bus, not a transport failure.
+  sendOk(id, data);
+}
+
 static void opI2cWriteRead(long id, JsonObject params) {
   TwoWire *bus = nullptr;
   if (!i2cBegin(id, params, &bus)) return;
@@ -335,6 +450,7 @@ static void opI2cWriteRead(long id, JsonObject params) {
   int address = params["address"] | -1;
   int readLength = params["readLength"] | 0;
   uint32_t delayMs = params["delayMs"] | 0;
+  bool repeatedStart = params["repeatedStart"] | false;
   JsonArray write = params["write"].as<JsonArray>();
 
   if (address < 0 || address > 0x7F) {
@@ -354,11 +470,14 @@ static void opI2cWriteRead(long id, JsonObject params) {
   uint32_t t0 = micros();
   bus->beginTransmission((uint8_t)address);
   for (JsonVariant v : write) bus->write((uint8_t)(v.as<int>() & 0xFF));
-  uint8_t rc = bus->endTransmission();
+  // A repeated START keeps the bus held between phases, which many devices
+  // require when the write only selects what the read should return.
+  uint8_t rc = bus->endTransmission(!repeatedStart);
 
   JsonDocument data;
   data["writeAck"] = (rc == 0);
   data["writeStatus"] = rc;
+  data["repeatedStart"] = repeatedStart;
 
   if (rc != 0) {
     data["durationUs"] = micros() - t0;
@@ -399,6 +518,8 @@ static void opSpiTransfer(long id, JsonObject params) {
   uint32_t clockHz = params["clockHz"] | 1000000UL;
   bool lsbFirst = params["lsbFirst"] | false;
   int readLength = params["readLength"] | 0;
+  int padByte = params["padByte"] | 0x00;
+  bool keepCsAsserted = params["keepCsAsserted"] | true;
   JsonArray tx = params["tx"].as<JsonArray>();
 
   if (!requirePins(id, {sclk, miso, mosi, cs})) return;
@@ -424,8 +545,11 @@ static void opSpiTransfer(long id, JsonObject params) {
   static uint8_t buffer[kMaxPayloadBytes];
   size_t i = 0;
   for (JsonVariant v : tx) buffer[i++] = (uint8_t)(v.as<int>() & 0xFF);
-  // Trailing clocks for the read phase are emitted as 0x00 — a benign idle byte.
-  while (i < total) buffer[i++] = 0x00;
+  // Filler clocked out during the read phase. Defaults to 0x00; the caller may
+  // choose another value where a device expects a specific idle byte.
+  while (i < total) buffer[i++] = (uint8_t)(padByte & 0xFF);
+
+  size_t txLength = tx.size();
 
   SPIClass spi(HSPI);
   spi.begin(sclk, miso, mosi, cs);
@@ -435,7 +559,17 @@ static void opSpiTransfer(long id, JsonObject params) {
   uint32_t t0 = micros();
   spi.beginTransaction(SPISettings(clockHz, lsbFirst ? LSBFIRST : MSBFIRST, mode));
   digitalWrite(cs, LOW);
-  spi.transfer(buffer, total);
+  if (keepCsAsserted || txLength == 0 || txLength == total) {
+    spi.transfer(buffer, total);
+  } else {
+    // Deassert CS between the write and read phases for devices that latch a
+    // command on the rising edge before responding.
+    spi.transfer(buffer, txLength);
+    digitalWrite(cs, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(cs, LOW);
+    spi.transfer(buffer + txLength, total - txLength);
+  }
   digitalWrite(cs, HIGH);
   spi.endTransaction();
   uint32_t elapsed = micros() - t0;
@@ -447,6 +581,11 @@ static void opSpiTransfer(long id, JsonObject params) {
   data["durationUs"] = elapsed;
   data["mode"] = mode;
   data["clockHz"] = clockHz;
+  data["lsbFirst"] = lsbFirst;
+  data["txLength"] = txLength;
+  data["keepCsAsserted"] = keepCsAsserted;
+  data["note"] =
+      "SPI is full duplex: bytes[0..txLength-1] were clocked in while tx was clocked out.";
   sendOk(id, data);
 }
 
@@ -478,15 +617,42 @@ static bool uartBegin(long id, JsonObject params, HardwareSerial **out, uint32_t
     return false;
   }
 
+  // Full 5-8 data bits x none/even/odd parity x 1/2 stop bits, as the UART
+  // peripheral supports. An unknown peer may use any of these.
   uint32_t config;
-  if (dataBits == 8 && stopBits == 1 && strcmp(parity, "none") == 0)      config = SERIAL_8N1;
-  else if (dataBits == 8 && stopBits == 1 && strcmp(parity, "even") == 0) config = SERIAL_8E1;
-  else if (dataBits == 8 && stopBits == 1 && strcmp(parity, "odd") == 0)  config = SERIAL_8O1;
-  else if (dataBits == 8 && stopBits == 2 && strcmp(parity, "none") == 0) config = SERIAL_8N2;
-  else if (dataBits == 7 && stopBits == 1 && strcmp(parity, "none") == 0) config = SERIAL_7N1;
-  else {
-    sendError(id, "UNSUPPORTED_OPERATION", "Unsupported data/parity/stop combination");
+  if (dataBits < 5 || dataBits > 8) {
+    sendError(id, "DEVICE_ERROR", "dataBits must be 5, 6, 7 or 8");
     return false;
+  }
+  if (stopBits != 1 && stopBits != 2) {
+    sendError(id, "DEVICE_ERROR", "stopBits must be 1 or 2");
+    return false;
+  }
+
+  const bool even = strcmp(parity, "even") == 0;
+  const bool odd = strcmp(parity, "odd") == 0;
+  if (!even && !odd && strcmp(parity, "none") != 0) {
+    sendError(id, "DEVICE_ERROR", "parity must be none, even or odd");
+    return false;
+  }
+
+  switch (dataBits) {
+    case 5:
+      config = stopBits == 2 ? (even ? SERIAL_5E2 : odd ? SERIAL_5O2 : SERIAL_5N2)
+                             : (even ? SERIAL_5E1 : odd ? SERIAL_5O1 : SERIAL_5N1);
+      break;
+    case 6:
+      config = stopBits == 2 ? (even ? SERIAL_6E2 : odd ? SERIAL_6O2 : SERIAL_6N2)
+                             : (even ? SERIAL_6E1 : odd ? SERIAL_6O1 : SERIAL_6N1);
+      break;
+    case 7:
+      config = stopBits == 2 ? (even ? SERIAL_7E2 : odd ? SERIAL_7O2 : SERIAL_7N2)
+                             : (even ? SERIAL_7E1 : odd ? SERIAL_7O1 : SERIAL_7N1);
+      break;
+    default:
+      config = stopBits == 2 ? (even ? SERIAL_8E2 : odd ? SERIAL_8O2 : SERIAL_8N2)
+                             : (even ? SERIAL_8E1 : odd ? SERIAL_8O1 : SERIAL_8N1);
+      break;
   }
 
 #if SOC_UART_NUM > 2
@@ -581,50 +747,561 @@ static void opUartWriteRead(long id, JsonObject params) {
 }
 
 // ---------------------------------------------------------------------------
-// gpio.* / adc.*
+// gpio.*
 // ---------------------------------------------------------------------------
 
+/** Busy-wait for sub-millisecond intervals, yielding on longer ones. */
+static void waitMicros(uint32_t us) {
+  if (us == 0) return;
+  if (us < 5000) {
+    delayMicroseconds(us);
+    return;
+  }
+  uint32_t deadline = micros() + us;
+  while ((int32_t)(micros() - deadline) < 0) yield();
+}
+
+static bool applyGpioMode(long id, int pin, const char *mode) {
+  if (strcmp(mode, "INPUT") == 0) {
+    pinMode(pin, INPUT);
+  } else if (strcmp(mode, "INPUT_PULLUP") == 0) {
+    pinMode(pin, INPUT_PULLUP);
+  } else if (strcmp(mode, "INPUT_PULLDOWN") == 0) {
+    pinMode(pin, INPUT_PULLDOWN);
+  } else if (strcmp(mode, "OUTPUT") == 0) {
+    pinMode(pin, OUTPUT);
+  } else if (strcmp(mode, "OUTPUT_OPEN_DRAIN") == 0) {
+    pinMode(pin, OUTPUT_OPEN_DRAIN);
+  } else {
+    sendError(id, "DEVICE_ERROR", String("Unknown GPIO mode: ") + mode);
+    return false;
+  }
+  return true;
+}
+
+static void opGpioConfigure(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  const char *mode = params["mode"] | "INPUT";
+  if (!requirePins(id, {pin})) return;
+  if (!applyGpioMode(id, pin, mode)) return;
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["mode"] = mode;
+  data["level"] = digitalRead(pin);
+  sendOk(id, data);
+}
+
+/** Read pin levels without altering how they are configured. */
 static void opGpioInfo(long id, JsonObject params) {
   JsonDocument data;
   JsonArray pins = data["pins"].to<JsonArray>();
+  JsonArray levels = data["levels"].to<JsonArray>();
   JsonArray requested = params["pins"].as<JsonArray>();
 
-  // Read-only inspection: pins are sampled as inputs and never driven.
-  if (!requested.isNull()) {
-    for (JsonVariant v : requested) {
-      int pin = v.as<int>();
-      JsonObject entry = pins.add<JsonObject>();
-      entry["gpio"] = pin;
-      entry["usable"] = pinIsUsable(pin);
-      if (pinIsUsable(pin)) {
-        pinMode(pin, INPUT);
-        entry["level"] = digitalRead(pin);
-      } else {
-        entry["reason"] = "reserved or out of range on this target";
-      }
+  if (requested.isNull() || requested.size() == 0) {
+    sendError(id, "DEVICE_ERROR", "pins must be a non-empty array");
+    return;
+  }
+
+  for (JsonVariant v : requested) {
+    int pin = v.as<int>();
+    JsonObject entry = pins.add<JsonObject>();
+    entry["gpio"] = pin;
+    entry["usable"] = pinIsUsable(pin);
+    if (pinIsUsable(pin)) {
+      int level = digitalRead(pin);
+      entry["level"] = level;
+      levels.add(level);
+    } else {
+      entry["reason"] = "not bonded out, or wired to SPI flash on this target";
     }
   }
 
-  data["note"] = "Levels sampled with INPUT (no pull-up/down applied); pins are never driven.";
+  data["note"] = "Levels read as-is; this operation does not reconfigure or drive any pin.";
   sendOk(id, data);
 }
+
+/** Drive a pin to a level. The caller named the pin, so the agent drives it. */
+static void opGpioWrite(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  int level = params["level"] | 0;
+  if (!requirePins(id, {pin})) return;
+  if (level != 0 && level != 1) {
+    sendError(id, "DEVICE_ERROR", "level must be 0 or 1");
+    return;
+  }
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, level ? HIGH : LOW);
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["level"] = level;
+  data["readback"] = digitalRead(pin);
+  sendOk(id, data);
+}
+
+static void opGpioPulse(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  int level = params["level"] | 1;
+  uint32_t durationUs = params["durationUs"] | 1000UL;
+  int returnLevel = params["returnToLevel"] | (level ? 0 : 1);
+
+  if (!requirePins(id, {pin})) return;
+  if (durationUs > 10000000UL) durationUs = 10000000UL;
+
+  pinMode(pin, OUTPUT);
+  uint32_t t0 = micros();
+  digitalWrite(pin, level ? HIGH : LOW);
+  waitMicros(durationUs);
+  digitalWrite(pin, returnLevel ? HIGH : LOW);
+  uint32_t elapsed = micros() - t0;
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["level"] = level;
+  data["returnToLevel"] = returnLevel;
+  data["requestedUs"] = durationUs;
+  data["actualUs"] = elapsed;
+  sendOk(id, data);
+}
+
+/**
+ * Sample several pins repeatedly on one timebase.
+ *
+ * Samples are interleaved per round so a snapshot across pins shares an instant
+ * — the basis for correlating one signal against another.
+ */
+static void opGpioSample(long id, JsonObject params) {
+  JsonArray requested = params["pins"].as<JsonArray>();
+  int samples = params["samples"] | 16;
+  uint32_t intervalUs = params["intervalUs"] | 1000UL;
+
+  if (requested.isNull() || requested.size() == 0) {
+    sendError(id, "DEVICE_ERROR", "pins must be a non-empty array");
+    return;
+  }
+  if (samples < 1) samples = 1;
+  if ((size_t)samples > kMaxSamples) samples = kMaxSamples;
+
+  int pins[16];
+  size_t pinCount = 0;
+  for (JsonVariant v : requested) {
+    if (pinCount >= 16) break;
+    int pin = v.as<int>();
+    if (!requirePins(id, {pin})) return;
+    pinMode(pin, INPUT);
+    pins[pinCount++] = pin;
+  }
+
+  JsonDocument data;
+  JsonArray pinList = data["pins"].to<JsonArray>();
+  for (size_t i = 0; i < pinCount; i++) pinList.add(pins[i]);
+
+  JsonArray rounds = data["rounds"].to<JsonArray>();
+  JsonArray timestamps = data["timestampsUs"].to<JsonArray>();
+  JsonArray flat = data["levels"].to<JsonArray>();
+
+  uint32_t t0 = micros();
+  for (int s = 0; s < samples; s++) {
+    JsonArray round = rounds.add<JsonArray>();
+    timestamps.add(micros() - t0);
+    for (size_t i = 0; i < pinCount; i++) {
+      int level = digitalRead(pins[i]);
+      round.add(level);
+      flat.add(level);
+    }
+    if (intervalUs > 0 && s + 1 < samples) waitMicros(intervalUs);
+  }
+
+  data["durationUs"] = micros() - t0;
+  data["sampleCount"] = samples;
+  data["note"] = "Each round holds one level per pin, in the order given by `pins`.";
+  sendOk(id, data);
+}
+
+/** Measure the width of a single pulse at the given level. */
+static void opGpioMeasurePulse(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  int level = params["level"] | 1;
+  uint32_t timeoutUs = params["timeoutUs"] | 1000000UL;
+
+  if (!requirePins(id, {pin})) return;
+  if (timeoutUs > 10000000UL) timeoutUs = 10000000UL;
+
+  pinMode(pin, INPUT);
+  uint32_t width = pulseIn(pin, level ? HIGH : LOW, timeoutUs);
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["level"] = level;
+  data["widthUs"] = width;
+  data["timedOut"] = (width == 0);
+  if (width == 0) {
+    data["note"] = "pulseIn returned 0: no matching pulse started within the timeout.";
+  }
+  sendOk(id, data);
+}
+
+/** Count edges over a window and derive a frequency. */
+static void opGpioMeasureFrequency(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  uint32_t windowMs = params["windowMs"] | 100UL;
+  const char *edge = params["edge"] | "RISING";
+
+  if (!requirePins(id, {pin})) return;
+  if (windowMs > kMaxCaptureMs) windowMs = kMaxCaptureMs;
+  if (windowMs < 1) windowMs = 1;
+
+  pinMode(pin, INPUT);
+
+  bool countBoth = strcmp(edge, "CHANGE") == 0;
+  bool countRising = strcmp(edge, "FALLING") != 0;
+
+  uint32_t edges = 0;
+  int previous = digitalRead(pin);
+  uint32_t t0 = micros();
+  uint32_t deadline = millis() + windowMs;
+
+  while ((int32_t)(millis() - deadline) < 0) {
+    int current = digitalRead(pin);
+    if (current != previous) {
+      if (countBoth || (countRising && current == HIGH) || (!countRising && current == LOW)) {
+        edges++;
+      }
+      previous = current;
+    }
+  }
+
+  uint32_t elapsedUs = micros() - t0;
+  JsonDocument data;
+  data["pin"] = pin;
+  data["edge"] = edge;
+  data["edgeCount"] = edges;
+  data["windowUs"] = elapsedUs;
+  if (elapsedUs > 0) {
+    data["frequencyHz"] = (float)edges * 1000000.0f / (float)elapsedUs;
+  }
+  data["note"] =
+      "Edges counted by polling. The sampling loop bounds the measurable frequency well below "
+      "the GPIO limit; treat the result as a floor, not the pin's maximum.";
+  sendOk(id, data);
+}
+
+/** Block until an edge occurs, reporting how long it took. */
+static void opGpioWaitEdge(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  const char *edge = params["edge"] | "CHANGE";
+  uint32_t timeoutMs = params["timeoutMs"] | 1000UL;
+
+  if (!requirePins(id, {pin})) return;
+  if (timeoutMs > kMaxCaptureMs) timeoutMs = kMaxCaptureMs;
+
+  pinMode(pin, INPUT);
+  int initial = digitalRead(pin);
+  bool wantRising = strcmp(edge, "RISING") == 0;
+  bool wantFalling = strcmp(edge, "FALLING") == 0;
+
+  uint32_t t0 = micros();
+  uint32_t deadline = millis() + timeoutMs;
+  bool seen = false;
+  int previous = initial;
+
+  while ((int32_t)(millis() - deadline) < 0) {
+    int current = digitalRead(pin);
+    if (current != previous) {
+      if ((wantRising && current == HIGH) || (wantFalling && current == LOW) ||
+          (!wantRising && !wantFalling)) {
+        seen = true;
+        break;
+      }
+      previous = current;
+    }
+    yield();
+  }
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["edge"] = edge;
+  data["initialLevel"] = initial;
+  data["finalLevel"] = digitalRead(pin);
+  data["observed"] = seen;
+  data["elapsedUs"] = micros() - t0;
+  data["timedOut"] = !seen;
+  sendOk(id, data);
+}
+
+/**
+ * Drive a stimulus on one pin while sampling others on the same timebase.
+ *
+ * Component behaviour is often only visible as a correlation between a stimulus
+ * and a response on a different signal, which separate calls cannot capture.
+ */
+static void opGpioStimulusCapture(long id, JsonObject params) {
+  JsonObject stimulus = params["stimulus"].as<JsonObject>();
+  JsonArray captureArr = params["capturePins"].as<JsonArray>();
+  int samples = params["samples"] | 32;
+  uint32_t intervalUs = params["intervalUs"] | 100UL;
+
+  if (stimulus.isNull() || captureArr.isNull() || captureArr.size() == 0) {
+    sendError(id, "DEVICE_ERROR", "stimulus and a non-empty capturePins array are required");
+    return;
+  }
+  if (samples < 1) samples = 1;
+  if ((size_t)samples > kMaxSamples) samples = kMaxSamples;
+
+  int stimPin = stimulus["pin"] | -1;
+  const char *kind = stimulus["kind"] | "PULSE";
+  int level = stimulus["level"] | 1;
+  uint32_t durationUs = stimulus["durationUs"] | 1000UL;
+  int cycles = stimulus["cycles"] | 1;
+  if (cycles < 1) cycles = 1;
+  if (cycles > 1000) cycles = 1000;
+  if (durationUs > 10000000UL) durationUs = 10000000UL;
+
+  if (!requirePins(id, {stimPin})) return;
+
+  int capturePins[16];
+  size_t captureCount = 0;
+  for (JsonVariant v : captureArr) {
+    if (captureCount >= 16) break;
+    int pin = v.as<int>();
+    if (pin == stimPin) {
+      sendError(id, "DEVICE_ERROR", "capture pin must differ from the stimulus pin");
+      return;
+    }
+    if (!requirePins(id, {pin})) return;
+    pinMode(pin, INPUT);
+    capturePins[captureCount++] = pin;
+  }
+
+  pinMode(stimPin, OUTPUT);
+
+  JsonDocument data;
+  JsonArray pinList = data["capturePins"].to<JsonArray>();
+  for (size_t i = 0; i < captureCount; i++) pinList.add(capturePins[i]);
+
+  JsonArray rounds = data["rounds"].to<JsonArray>();
+  JsonArray timestamps = data["timestampsUs"].to<JsonArray>();
+  JsonArray stimTrace = data["stimulusLevels"].to<JsonArray>();
+  JsonArray flat = data["levels"].to<JsonArray>();
+
+  uint32_t t0 = micros();
+  int stimLevel = (strcmp(kind, "LEVEL") == 0) ? level : (level ? 0 : 1);
+  digitalWrite(stimPin, stimLevel ? HIGH : LOW);
+
+  int cycleIndex = 0;
+  uint32_t nextTransitionUs = 0;
+
+  for (int s = 0; s < samples; s++) {
+    uint32_t nowUs = micros() - t0;
+
+    // Advance the stimulus waveform on its own schedule, independent of the
+    // sample loop, so the capture records the transition rather than causing it.
+    if (strcmp(kind, "PULSE") == 0 || strcmp(kind, "TOGGLE") == 0) {
+      if (nowUs >= nextTransitionUs && cycleIndex < cycles * 2) {
+        stimLevel = (cycleIndex % 2 == 0) ? (level ? 1 : 0) : (level ? 0 : 1);
+        digitalWrite(stimPin, stimLevel ? HIGH : LOW);
+        nextTransitionUs = nowUs + durationUs;
+        cycleIndex++;
+      }
+    }
+
+    JsonArray round = rounds.add<JsonArray>();
+    timestamps.add(nowUs);
+    stimTrace.add(stimLevel);
+    for (size_t i = 0; i < captureCount; i++) {
+      int reading = digitalRead(capturePins[i]);
+      round.add(reading);
+      flat.add(reading);
+    }
+
+    if (intervalUs > 0 && s + 1 < samples) waitMicros(intervalUs);
+  }
+
+  // Leave the stimulus pin low rather than holding an arbitrary drive level.
+  digitalWrite(stimPin, LOW);
+
+  data["stimulusPin"] = stimPin;
+  data["kind"] = kind;
+  data["durationUs"] = micros() - t0;
+  data["sampleCount"] = samples;
+  data["note"] =
+      "stimulusLevels[i] is the level driven at the instant rounds[i] was sampled. The stimulus "
+      "pin is left LOW on completion.";
+  sendOk(id, data);
+}
+
+// ---------------------------------------------------------------------------
+// adc.*
+// ---------------------------------------------------------------------------
 
 static void opAdcRead(long id, JsonObject params) {
   int pin = params["pin"] | -1;
   int samples = params["samples"] | 1;
+  uint32_t intervalUs = params["intervalUs"] | 0UL;
+  bool hasAtten = params["attenuationDb"].is<float>() || params["attenuationDb"].is<int>();
+  float attenDb = params["attenuationDb"] | 11.0f;
+
   if (!requirePins(id, {pin})) return;
   if (samples < 1) samples = 1;
-  if (samples > 64) samples = 64;
+  if ((size_t)samples > kMaxSamples) samples = kMaxSamples;
+
+  if (hasAtten) {
+    adc_attenuation_t attenuation = ADC_11db;
+    if (attenDb < 1.0f)      attenuation = ADC_0db;
+    else if (attenDb < 4.0f) attenuation = ADC_2_5db;
+    else if (attenDb < 8.0f) attenuation = ADC_6db;
+    analogSetPinAttenuation(pin, attenuation);
+  }
 
   JsonDocument data;
   JsonArray values = data["values"].to<JsonArray>();
+  JsonArray timestamps = data["timestampsUs"].to<JsonArray>();
+
   uint32_t t0 = micros();
   for (int i = 0; i < samples; i++) {
+    timestamps.add(micros() - t0);
     values.add(analogRead(pin));
+    if (intervalUs > 0 && i + 1 < samples) waitMicros(intervalUs);
   }
+
   data["durationUs"] = micros() - t0;
   data["pin"] = pin;
+  data["sampleCount"] = samples;
   data["resolutionBits"] = 12;
+  if (hasAtten) data["attenuationDb"] = attenDb;
+  data["note"] =
+      "Raw ADC counts. This agent applies no calibration, and the ESP32 ADC is markedly "
+      "non-linear near the rails; convert to volts only with a calibration you trust.";
+  sendOk(id, data);
+}
+
+// ---------------------------------------------------------------------------
+// pwm.* — stimulus generation via the LEDC peripheral
+// ---------------------------------------------------------------------------
+
+static int findPwmChannel(int pin, bool allocate) {
+  for (int i = 0; i < kMaxPwmChannels; i++) {
+    if (g_pwmActive[i] && g_pwmPins[i] == pin) return i;
+  }
+  if (!allocate) return -1;
+  for (int i = 0; i < kMaxPwmChannels; i++) {
+    if (!g_pwmActive[i]) return i;
+  }
+  return -1;
+}
+
+static void opPwmStart(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  uint32_t frequencyHz = params["frequencyHz"] | 1000UL;
+  float duty = params["duty"] | 0.5f;
+  int resolutionBits = params["resolutionBits"] | 10;
+  uint32_t durationMs = params["durationMs"] | 0UL;
+
+  if (!requirePins(id, {pin})) return;
+  if (frequencyHz < 1) {
+    sendError(id, "DEVICE_ERROR", "frequencyHz must be at least 1");
+    return;
+  }
+  if (duty < 0.0f || duty > 1.0f) {
+    sendError(id, "DEVICE_ERROR", "duty must be between 0.0 and 1.0");
+    return;
+  }
+  if (resolutionBits < 1 || resolutionBits > 20) {
+    sendError(id, "DEVICE_ERROR", "resolutionBits must be 1-20");
+    return;
+  }
+  // The LEDC timer divides an 80 MHz source; frequency x 2^bits must fit.
+  double required = (double)frequencyHz * (double)(1UL << resolutionBits);
+  if (required > 80000000.0) {
+    sendError(id, "DEVICE_ERROR",
+              String("frequency/resolution combination needs a ") + String(required / 1e6, 1) +
+                  " MHz LEDC clock; the source is 80 MHz");
+    return;
+  }
+  if (durationMs > kMaxCaptureMs) durationMs = kMaxCaptureMs;
+
+  int channel = findPwmChannel(pin, true);
+  if (channel < 0) {
+    sendError(id, "DEVICE_ERROR", "No free LEDC channel; stop an existing PWM output first");
+    return;
+  }
+
+  uint32_t maxDuty = (1UL << resolutionBits) - 1;
+  uint32_t dutyValue = (uint32_t)(duty * (float)maxDuty);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  if (!ledcAttachChannel(pin, frequencyHz, resolutionBits, channel)) {
+    sendError(id, "DEVICE_ERROR", "ledcAttachChannel failed for this pin/frequency");
+    return;
+  }
+  ledcWrite(pin, dutyValue);
+#else
+  ledcSetup(channel, frequencyHz, resolutionBits);
+  ledcAttachPin(pin, channel);
+  ledcWrite(channel, dutyValue);
+#endif
+
+  g_pwmPins[channel] = pin;
+  g_pwmActive[channel] = true;
+
+  JsonDocument data;
+  data["pin"] = pin;
+  data["channel"] = channel;
+  data["frequencyHz"] = frequencyHz;
+  data["resolutionBits"] = resolutionBits;
+  data["dutyValue"] = dutyValue;
+  data["dutyMax"] = maxDuty;
+  data["dutyFraction"] = (float)dutyValue / (float)maxDuty;
+
+  if (durationMs > 0) {
+    uint32_t deadline = millis() + durationMs;
+    while ((int32_t)(millis() - deadline) < 0) yield();
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcDetach(pin);
+#else
+    ledcDetachPin(pin);
+#endif
+    g_pwmActive[channel] = false;
+    pinMode(pin, INPUT);
+    data["stoppedAfterMs"] = durationMs;
+    data["running"] = false;
+  } else {
+    data["running"] = true;
+    data["note"] = "Output is still running. Call pwm.stop to end it.";
+  }
+
+  sendOk(id, data);
+}
+
+static void opPwmStop(long id, JsonObject params) {
+  int pin = params["pin"] | -1;
+  if (!requirePins(id, {pin})) return;
+
+  int channel = findPwmChannel(pin, false);
+  JsonDocument data;
+  data["pin"] = pin;
+
+  if (channel < 0) {
+    data["wasRunning"] = false;
+    data["note"] = "No PWM output was active on this pin.";
+    sendOk(id, data);
+    return;
+  }
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcDetach(pin);
+#else
+  ledcDetachPin(pin);
+#endif
+  g_pwmActive[channel] = false;
+  pinMode(pin, INPUT);
+
+  data["wasRunning"] = true;
+  data["channel"] = channel;
+  data["note"] = "Pin released and reconfigured as an input.";
   sendOk(id, data);
 }
 
@@ -659,6 +1336,8 @@ static void handleRequest(const String &line) {
     opI2cScan(id, params);
   } else if (strcmp(op, "i2c.read") == 0) {
     opI2cRead(id, params);
+  } else if (strcmp(op, "i2c.write") == 0) {
+    opI2cWrite(id, params);
   } else if (strcmp(op, "i2c.writeRead") == 0) {
     opI2cWriteRead(id, params);
   } else if (strcmp(op, "spi.transfer") == 0) {
@@ -667,10 +1346,32 @@ static void handleRequest(const String &line) {
     opUartListen(id, params);
   } else if (strcmp(op, "uart.writeRead") == 0) {
     opUartWriteRead(id, params);
-  } else if (strcmp(op, "gpio.info") == 0) {
+  } else if (strcmp(op, "gpio.info") == 0 || strcmp(op, "gpio.read") == 0) {
     opGpioInfo(id, params);
+  } else if (strcmp(op, "gpio.configure") == 0) {
+    opGpioConfigure(id, params);
+  } else if (strcmp(op, "gpio.write") == 0) {
+    opGpioWrite(id, params);
+  } else if (strcmp(op, "gpio.pulse") == 0) {
+    opGpioPulse(id, params);
+  } else if (strcmp(op, "gpio.sample") == 0) {
+    opGpioSample(id, params);
+  } else if (strcmp(op, "gpio.measurePulse") == 0) {
+    opGpioMeasurePulse(id, params);
+  } else if (strcmp(op, "gpio.measureFrequency") == 0) {
+    opGpioMeasureFrequency(id, params);
+  } else if (strcmp(op, "gpio.waitEdge") == 0) {
+    opGpioWaitEdge(id, params);
+  } else if (strcmp(op, "gpio.stimulusCapture") == 0) {
+    opGpioStimulusCapture(id, params);
   } else if (strcmp(op, "adc.read") == 0) {
     opAdcRead(id, params);
+  } else if (strcmp(op, "pwm.start") == 0) {
+    opPwmStart(id, params);
+  } else if (strcmp(op, "pwm.stop") == 0) {
+    opPwmStop(id, params);
+  } else if (strcmp(op, "sys.capabilities") == 0) {
+    opSysCapabilities(id);
   } else {
     sendError(id, "UNSUPPORTED_OPERATION", String("Unknown op: ") + op);
   }
@@ -679,6 +1380,10 @@ static void handleRequest(const String &line) {
 void setup() {
   Serial.begin(115200);
   g_line.reserve(kRequestCapacity);
+  for (int i = 0; i < kMaxPwmChannels; i++) {
+    g_pwmPins[i] = -1;
+    g_pwmActive[i] = false;
+  }
   // Announce on a non-JSON line so the bridge records it as raw context without
   // mistaking it for a response.
   Serial.println("# esp32-interrogation-agent " AGENT_VERSION " ready");

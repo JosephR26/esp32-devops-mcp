@@ -62,7 +62,15 @@ export function depthRank(depth: InterrogationDepth): number {
   return INTERROGATION_DEPTHS.indexOf(depth);
 }
 
-/** Whether a probe is permitted at the requested interrogation depth. */
+/**
+ * Whether a depth preset includes this probe by default.
+ *
+ * `minDepth` on a profile probe is scheduling guidance — it keeps a slow probe
+ * out of a quick connectivity check — not a permission boundary. A caller can
+ * always run any probe by naming it explicitly, and can always construct the
+ * equivalent operation directly. Depth selects a default breadth of
+ * investigation; it never caps what may be investigated.
+ */
 export function shouldRunProbe(probe: SafeProbe, depth: InterrogationDepth): boolean {
   return depthRank(depth) >= depthRank(probe.minDepth ?? 'BASIC');
 }

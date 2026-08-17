@@ -251,6 +251,17 @@ export const MPU6050_I2C_HANDLERS: Record<string, MockHandler> = {
     };
   },
   'i2c.read': () => ({ data: { bytes: [0x68, 0x00, 0x00, 0x00], durationUs: 400 } }),
+  'i2c.write': (params) => ({
+    data: {
+      address: params.address,
+      bytesQueued: (params.write as number[]).length,
+      writeAck: true,
+      writeStatus: 0,
+      statusText: 'ACK',
+      durationUs: 250,
+      bytes: [],
+    },
+  }),
   'i2c.writeRead': (params) => {
     const register = ((params.write as number[]) ?? [])[0];
     const readLength = Number(params.readLength ?? 1);
@@ -367,6 +378,137 @@ export const NEO6M_UART_HANDLERS: Record<string, MockHandler> = {
 export const SILENT_UART_HANDLERS: Record<string, MockHandler> = {
   ...ESP32_DEVKITC_SYS_HANDLERS,
   'uart.listen': () => ({ data: { bytes: [], gapsUs: [], durationMs: 3000, truncated: false } }),
+};
+
+/**
+ * A generic agent with no device attached: every primitive answers structurally,
+ * so the operation layer can be exercised without assuming any component.
+ */
+export const GENERIC_AGENT_HANDLERS: Record<string, MockHandler> = {
+  ...ESP32_DEVKITC_SYS_HANDLERS,
+  'sys.capabilities': () => ({
+    data: {
+      agentVersion: '2.0.0',
+      operations: [
+        'sys.ping', 'sys.info', 'sys.interfaces', 'sys.capabilities',
+        'i2c.scan', 'i2c.read', 'i2c.write', 'i2c.writeRead',
+        'spi.transfer', 'uart.listen', 'uart.writeRead',
+        'gpio.read', 'gpio.configure', 'gpio.write', 'gpio.pulse', 'gpio.sample',
+        'gpio.measurePulse', 'gpio.measureFrequency', 'gpio.waitEdge', 'gpio.stimulusCapture',
+        'adc.read', 'pwm.start', 'pwm.stop',
+      ],
+      limits: { maxPayloadBytes: 512, maxSamples: 1024, maxCaptureMs: 30000 },
+      unavailable: [
+        { capability: 'i2s.*', reason: 'Not implemented; I2S needs continuous DMA streaming.' },
+        { capability: 'can.* (TWAI)', reason: 'Not implemented; needs an external transceiver.' },
+      ],
+    },
+  }),
+  'i2c.scan': () => ({ data: { addresses: [], scanDurationMs: 20 } }),
+  'i2c.read': (params) => ({
+    data: { bytes: new Array(Number(params.length ?? 1)).fill(0x5a), durationUs: 300 },
+  }),
+  // Echoes what it was asked to write, so tests can prove bytes pass through
+  // unaltered rather than being filtered against any allow-list.
+  'i2c.write': (params) => ({
+    data: {
+      address: params.address,
+      bytesQueued: (params.write as number[]).length,
+      writeAck: true,
+      writeStatus: 0,
+      statusText: 'ACK',
+      durationUs: 200,
+      bytes: [],
+      echo: params.write,
+    },
+  }),
+  'i2c.writeRead': (params) => ({
+    data: {
+      writeAck: true,
+      writeStatus: 0,
+      bytes: new Array(Number(params.readLength ?? 0)).fill(0xa5),
+      durationUs: 400,
+      echo: params.write,
+    },
+  }),
+  'spi.transfer': (params) => {
+    const tx = (params.tx as number[]) ?? [];
+    const total = tx.length + Number(params.readLength ?? 0);
+    return { data: { bytes: new Array(total).fill(0x3c), durationUs: 120, echo: tx } };
+  },
+  'uart.listen': (params) => ({
+    data: { bytes: [0x4f, 0x4b], gapsUs: [0, 100], durationMs: params.durationMs, truncated: false },
+  }),
+  'uart.writeRead': (params) => ({
+    data: { bytes: [0x4f, 0x4b], durationUs: 500, complete: true, echo: params.write },
+  }),
+  'gpio.configure': (params) => ({ data: { pin: params.pin, mode: params.mode, level: 0 } }),
+  'gpio.read': (params) => ({
+    data: {
+      pins: (params.pins as number[]).map((gpio) => ({ gpio, usable: true, level: 1 })),
+      levels: (params.pins as number[]).map(() => 1),
+    },
+  }),
+  'gpio.write': (params) => ({ data: { pin: params.pin, level: params.level, readback: params.level } }),
+  'gpio.pulse': (params) => ({
+    data: { pin: params.pin, requestedUs: params.durationUs, actualUs: Number(params.durationUs) + 3 },
+  }),
+  'gpio.sample': (params) => {
+    const pins = params.pins as number[];
+    const samples = Number(params.samples ?? 4);
+    const rounds = Array.from({ length: samples }, (_, i) => pins.map(() => i % 2));
+    return {
+      data: {
+        pins,
+        rounds,
+        levels: rounds.flat(),
+        timestampsUs: rounds.map((_, i) => i * 1000),
+        sampleCount: samples,
+        durationUs: samples * 1000,
+      },
+    };
+  },
+  'gpio.measurePulse': () => ({ data: { widthUs: 1234, timedOut: false } }),
+  'gpio.measureFrequency': () => ({ data: { edgeCount: 100, windowUs: 100000, frequencyHz: 1000 } }),
+  'gpio.waitEdge': () => ({ data: { observed: true, elapsedUs: 250, timedOut: false } }),
+  'gpio.stimulusCapture': (params) => {
+    const capturePins = params.capturePins as number[];
+    const samples = Number(params.samples ?? 8);
+    const rounds = Array.from({ length: samples }, (_, i) => capturePins.map(() => (i > 2 ? 1 : 0)));
+    return {
+      data: {
+        capturePins,
+        rounds,
+        levels: rounds.flat(),
+        stimulusLevels: rounds.map((_, i) => (i > 1 ? 1 : 0)),
+        timestampsUs: rounds.map((_, i) => i * 100),
+        sampleCount: samples,
+      },
+    };
+  },
+  'adc.read': (params) => {
+    const samples = Number(params.samples ?? 1);
+    return {
+      data: {
+        pin: params.pin,
+        values: Array.from({ length: samples }, (_, i) => 2048 + i),
+        timestampsUs: Array.from({ length: samples }, (_, i) => i * 100),
+        sampleCount: samples,
+        resolutionBits: 12,
+      },
+    };
+  },
+  'pwm.start': (params) => ({
+    data: {
+      pin: params.pin,
+      channel: 0,
+      frequencyHz: params.frequencyHz,
+      dutyValue: 512,
+      dutyMax: 1023,
+      running: params.durationMs === undefined,
+    },
+  }),
+  'pwm.stop': (params) => ({ data: { pin: params.pin, wasRunning: true, channel: 0 } }),
 };
 
 /** Transport whose agent never answers. */

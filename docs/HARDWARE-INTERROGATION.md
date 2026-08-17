@@ -1,21 +1,48 @@
 # Hardware Interrogation Subsystem
 
-> Turning the ESP32 DevOps MCP from a firmware-development server into one that can
-> systematically interrogate physical hardware and determine what it actually supports.
+> The ESP32 as a general-purpose physical instrument.
 
-## The one rule
+```
+Claude  ->  ESP32 DevOps MCP  ->  ESP32 DevKitC-32  ->  physical component
+```
 
-**A datasheet claim is never a verified capability.**
+The MCP does not know what is attached, and does not need to. It exposes the
+ESP32's real capabilities — buses, pins, timing, stimulus, measurement — and lets
+the caller construct whatever investigation the component's externally observable
+behaviour allows.
 
-Every value this subsystem produces carries its evidence source and confidence.
-"The datasheet says the PN532 supports FeliCa" and "we exchanged FeliCa frames with
-this PN532" are different facts, stored in different fields, and the system will
-never let the first masquerade as the second.
+## The two rules
+
+**1. A datasheet claim is never a verified capability.**
+
+Every value carries its evidence source and confidence. "The datasheet says this
+part supports FeliCa" and "we exchanged FeliCa frames with this unit" are
+different facts, stored in different fields, and the first never masquerades as
+the second.
+
+**2. The MCP exposes capabilities; it does not prescribe the investigation.**
+
+An operation is refused only when it is *physically* invalid on this chip — a pin
+that does not exist, a pin wired to flash, an input-only pin asked to drive, a
+parameter outside the silicon's range, a resource conflict, or malformed
+arguments. An operation is never refused because nobody anticipated it.
+
+There is no allow-list of permitted commands. Arbitrary bytes are arbitrary.
+
+## Component profiles are optional
+
+A profile is **knowledge, not permission**. When one exists it accelerates
+investigation by naming registers, decoding bitfields, supplying expected
+responses and suggesting probes. When one does not exist, everything is still
+reachable through the generic primitives.
+
+> A missing profile entry means **UNKNOWN**, not **FORBIDDEN**.
 
 ---
 
 ## Contents
 
+- [The general-purpose layer](#the-general-purpose-layer)
 - [Architecture](#architecture)
 - [The interrogation pipeline](#the-interrogation-pipeline)
 - [The interrogation agent](#the-interrogation-agent)
@@ -29,8 +56,97 @@ never let the first masquerade as the second.
 - [Reproducibility](#reproducibility)
 - [Safety model](#safety-model)
 - [Testing strategy](#testing-strategy)
-- [Worked example: PN532 on an ESP32 DevKitC-32](#worked-example-pn532-on-an-esp32-devkitc-32)
+- [Worked examples](#worked-examples)
 - [Adding a component profile](#adding-a-component-profile)
+
+---
+
+## The general-purpose layer
+
+### `esp32_hardware_execute`
+
+The core tool. Runs a sequence of operations you construct, against hardware the
+MCP knows nothing about.
+
+```json
+{
+  "operations": [
+    { "op": "I2C_SCAN", "bus": { "sda": 21, "scl": 22 } },
+    { "op": "I2C_WRITE", "address": 66, "write": [222, 173, 190, 239] },
+    { "op": "I2C_WRITE_READ", "address": 66, "write": [127], "readLength": 16,
+      "delayMs": 20, "repeatedStart": true },
+    { "op": "GPIO_PULSE", "pin": 25, "level": 1, "durationUs": 500 },
+    { "op": "ADC_READ", "pin": 34, "samples": 64, "intervalUs": 100 }
+  ],
+  "repetitions": 5
+}
+```
+
+Available operations:
+
+| Interface | Operations |
+|-----------|-----------|
+| I2C | `I2C_SCAN`, `I2C_READ`, `I2C_WRITE`, `I2C_WRITE_READ` (arbitrary bytes, repeated start, inter-phase delay) |
+| SPI | `SPI_TRANSFER` (arbitrary TX, read length, mode 0-3, clock, bit order, pad byte, CS control) |
+| UART | `UART_WRITE`, `UART_READ`, `UART_WRITE_READ` (arbitrary bytes, baud, data bits, parity, stop bits, timeout) |
+| GPIO | `GPIO_CONFIGURE`, `GPIO_READ`, `GPIO_WRITE`, `GPIO_PULSE`, `GPIO_SAMPLE` (multi-pin, one timebase) |
+| Timing | `GPIO_MEASURE_PULSE`, `GPIO_MEASURE_FREQUENCY`, `GPIO_WAIT_EDGE` |
+| Analogue | `ADC_READ` (sample count, interval, attenuation) |
+| Stimulus | `PWM_START`, `PWM_STOP` (frequency, duty, resolution, duration) |
+| Multi-signal | `STIMULUS_CAPTURE` — drive one pin while sampling others on a shared timebase |
+| Control | `DELAY` |
+
+Every operation returns raw bytes, derived statistics, the verbatim agent
+response, the exact request echoed back, timing, and any warnings.
+
+### `esp32_pin_capabilities`
+
+What each pin on *this* chip can actually do, so an experiment can be planned
+rather than guessed:
+
+- digital input / output, PWM, ADC, DAC, touch, GPIO-matrix routability
+- which pins are reserved, and why
+- which are strapping pins (usable — reported as a note, never a refusal)
+- what the running firmware currently has allocated
+- which agent capabilities this firmware build does not implement
+
+The ESP32 GPIO matrix routes most peripheral signals to most pins, so bus
+assignments are far more flexible than a board silkscreen suggests. The system
+reports; the caller decides. No pin is ever chosen implicitly.
+
+### Register writes
+
+`esp32_register_inspect` reads by default and writes when asked:
+
+```json
+{
+  "address": 104,
+  "writes": [
+    { "register": 107, "value": [0],
+      "justification": "Attempt to clear the sleep bit and observe the effect" }
+  ]
+}
+```
+
+A write is a legitimate investigative act — entering a mode, selecting a bank,
+triggering a measurement, clearing status, or testing undocumented behaviour.
+Each write records the bytes sent, the bus acknowledgement, the value read
+immediately before, and the state read back afterwards.
+
+> A bus ACK confirms the device accepted the bytes. It does **not** establish
+> that the device did what you intended. Read back and compare.
+
+### Adaptive investigation
+
+The MCP performs no reasoning. It provides expressive primitives and returns rich
+observations; the caller closes the loop:
+
+```
+OBSERVE -> HYPOTHESISE -> EXPERIMENT -> OBSERVE -> COMPARE -> HYPOTHESISE -> ...
+```
+
+Results from one `esp32_hardware_execute` call inform the operations of the next.
+Nothing requires the whole investigation to be known before it begins.
 
 ---
 
@@ -40,21 +156,23 @@ never let the first masquerade as the second.
 Claude
   │  MCP tool call
   ▼
+src/tools/execute.ts         GENERAL PATH: arbitrary operations, pin capability reporting
 src/tools/hardware.ts        inventory, interface discovery, I2C/SPI/UART discovery
 src/tools/component.ts       identify, probe, registers, capabilities, test, benchmark, experiment
   │
   ▼
 src/hardware/                the engine — knows nothing about any specific component
+  ├── operations.ts          arbitrary operations, validated against real silicon
   ├── session.ts             port resolution, agent detection, pin-safety checks
   ├── transport.ts           injectable HardwareTransport (replaced wholesale in tests)
   ├── probe.ts               executes declarative ProbeOperations
   ├── identify.ts            evidence-weighted identification scoring
   ├── capability.ts          capability model + gap analysis
-  ├── registers.ts           read-only register decoding
+  ├── registers.ts           register decoding
   ├── patterns.ts            byte patterns, ASCII, statistics
   ├── evidence.ts            confidence derivation, UNKNOWN handling
   ├── experiment.ts          experiment lifecycle orchestration
-  ├── esp32-catalog.ts       static datasheet data per ESP32 family
+  ├── esp32-catalog.ts       datasheet data + per-pin capability map
   ├── registry.ts            component profile registry + validation
   └── profiles/              component profiles — pure data
   │
@@ -72,7 +190,8 @@ Two properties make this work:
 
 **The engine is component-agnostic.** No file under `src/hardware/` other than
 `profiles/` mentions any specific part. Supporting a new component means adding a
-profile object.
+profile object — and a component with no profile is still fully investigable
+through `src/hardware/operations.ts`.
 
 **The transport is injectable.** `setTransportFactory()` replaces the serial path
 with a mock, so the entire pipeline — identification, register decoding, capability
@@ -139,22 +258,45 @@ target -> host   : {"id":1,"ok":true,"data":{"addresses":[{"address":36,"ackCoun
 | `sys.ping` | Agent presence and version |
 | `sys.info` | Chip, revision, cores, frequency, flash, PSRAM, MAC, features, reset reason, app descriptor |
 | `sys.interfaces` | Default bus pins as the running firmware sees them |
+| `sys.capabilities` | Which operations this build implements, its limits, and what it does not provide |
 | `i2c.scan` | Address sweep with per-address ACK counts and timing |
 | `i2c.read` | Plain read — no command byte emitted |
-| `i2c.writeRead` | Register-pointer or command write followed by a read |
-| `spi.transfer` | Full-duplex transfer with explicit mode, clock and bit order |
+| `i2c.write` | Arbitrary write with no read phase, including register writes |
+| `i2c.writeRead` | Write then read, with optional repeated START and inter-phase delay |
+| `spi.transfer` | Full-duplex transfer: arbitrary TX, mode, clock, bit order, pad byte, CS control |
 | `uart.listen` | Passive capture with per-byte inter-arrival gaps |
-| `uart.writeRead` | Send declared bytes and capture the reply |
-| `gpio.info` | Sample pin levels as inputs — never drives a pin |
-| `adc.read` | Sampled ADC reads |
+| `uart.writeRead` | Send arbitrary bytes and capture the reply |
+| `gpio.read` | Read pin levels without reconfiguring them |
+| `gpio.configure` | Set a pin mode (input, pull-up, pull-down, output, open-drain) |
+| `gpio.write` | Drive a pin to a level |
+| `gpio.pulse` | Drive a timed pulse and report the achieved width |
+| `gpio.sample` | Sample several pins repeatedly on one timebase |
+| `gpio.measurePulse` | Measure a single pulse width |
+| `gpio.measureFrequency` | Count edges over a window and derive frequency |
+| `gpio.waitEdge` | Block until an edge, reporting elapsed time |
+| `gpio.stimulusCapture` | Drive one pin while sampling others on a shared timebase |
+| `adc.read` | Sampled ADC reads with interval and attenuation |
+| `pwm.start` / `pwm.stop` | LEDC waveform generation as an experimental stimulus |
 
 ### Agent design rules
 
-- **Passive at boot.** No bus is initialised and no GPIO is driven until a request names the pins.
-- **No arbitrary register write op exists.** `i2c.writeRead` exists because addressed reads and documented identification commands require emitting bytes; the host gates it behind declared, justified probes.
-- **Refuses unsafe pins.** GPIO6–11 on the classic ESP32 (SPI flash) are rejected outright.
-- **Everything bounded.** Every operation has an explicit length and timeout ceiling.
+- **Passive at boot.** No bus is initialised and no GPIO is driven until a request names the pins. Once a request names a pin, the agent drives it — this is an instrument, not a read-only observer.
+- **General purpose.** Arbitrary bytes may be written to any bus and any pin the caller names. The agent maintains no list of permitted commands and does not know what is attached.
+- **Refusals are physical.** GPIO6–11 on the classic ESP32 (SPI flash) are rejected outright, as are out-of-range pins and parameters. Nothing is rejected for being unanticipated.
+- **Everything bounded.** Every operation has an explicit length and timeout ceiling so one request cannot hang the agent.
 - **No flash, NVS, credential or firmware readout.**
+- **Self-describing.** `sys.capabilities` reports what this build implements and, explicitly, what it does not.
+
+### Capabilities the agent does not provide
+
+Reported by `sys.capabilities` rather than left to fail obscurely:
+
+| Capability | Why |
+|-----------|-----|
+| `i2s.*` | Needs continuous DMA streaming the JSON link cannot carry |
+| `can.*` (TWAI) | Not implemented; also needs an external transceiver |
+| `dac.write`, `touch.read` | Not implemented in this build |
+| High-speed logic capture | GPIO sampling is a polling loop, so the rate is bounded well below the pin's switching limit. Use an external logic analyser for fast signals. |
 
 ### Building and flashing the agent
 
@@ -363,12 +505,23 @@ See [Experiment model](#experiment-model).
 | `DEEP` | + every safe documented readable register, configuration and status state, feature discovery, timing |
 | `FORENSIC` | + repeated measurements, consistency checks, response fingerprinting, undocumented-but-observed behaviour, anomaly detection, capability gap analysis |
 
-**FORENSIC means deeper observation, not destructive action.** No depth enables a
-register write, a firmware readout, or a protocol fuzz. Depth controls how much
-observation happens, never how safe it is.
+**Depths are presets, not ceilings.**
 
-Profiles gate individual probes with `minDepth`, so a probe that takes a second to
-run does not fire during a quick `BASIC` connectivity check.
+`FORENSIC` is the most thorough default — it is not the maximum possible
+investigation. Claude can always formulate another experiment after any depth
+completes.
+
+To go beyond a preset:
+
+| Want | Use |
+|------|-----|
+| A probe the preset skipped | `additionalProbes: ["probe.id"]` |
+| Register inspection below DEEP | `inspectRegisters: true` |
+| Something no probe covers | `additionalOperations: [...]` |
+| Anything at all | `esp32_hardware_execute` |
+
+`minDepth` on a profile probe is scheduling guidance — it keeps a slow probe out
+of a quick connectivity check — not a permission boundary.
 
 ---
 
@@ -631,49 +784,58 @@ Facts that could not be gathered are `known: false` rather than blank or invente
 
 ## Safety model
 
-The default philosophy:
+The constraints that remain are the ones that are physically real.
 
-```
-DISCOVER FIRST
-READ FIRST
-MEASURE FIRST
-WRITE ONLY WHEN EXPLICITLY JUSTIFIED
-```
+### What is enforced, and why
+
+| Constraint | Reason |
+|-----------|--------|
+| GPIO6-11 (ESP32) refused | Wired to SPI flash; driving them corrupts execution |
+| Pins outside the family's range refused | They do not exist |
+| Input-only pins refused for output roles | No output driver in the silicon |
+| A pin in two conflicting roles refused | Physical resource conflict |
+| PWM frequency x resolution bounded | The LEDC timer divides an 80 MHz source |
+| Bus clocks bounded | Outside the peripheral's supported range |
+| Payloads bounded to 512 bytes | The agent's fixed buffer |
+| Samples bounded to 1024 | The agent's capture buffer |
+| SPI chip-select must be named | An unspecified CS would select an unknown device |
+| UART RX/TX must be named | Nothing to listen on or talk to otherwise |
+| UART0 refused | It carries the agent link; reassigning it severs the session |
+| Malformed arguments refused | Not representable as a hardware operation |
+
+Every one of these is a fact about the ESP32 or the request. None is a judgement
+about what the caller ought to be investigating.
+
+### What is reported, not refused
+
+- **Strapping pins** are usable. Their level at reset selects boot mode, so
+  holding one may prevent a normal reboot — a note, not a block.
+- **A pin driven in one operation and sampled in another** is a legitimate
+  technique. It is flagged so the caller knows a self-read returns the drive
+  level, then it runs.
+- **Unknown chip family** means the host cannot check pins, so it defers to the
+  agent, which checks on-target. It does not refuse.
 
 ### What is not implemented, by design
 
+These are outside what a hardware interrogation instrument needs, and are absent
+from both the agent and the host:
+
 - Credential or payment-credential extraction
-- Arbitrary destructive operations
-- Uncontrolled GPIO manipulation
-- Arbitrary EEPROM writes
-- Unrestricted register writes
-- Firmware extraction
-- Destructive protocol fuzzing
+- Firmware readout from the target
+- Flash and NVS access
+- Mass or automated targeting
 
-### Enforced constraints
+Note what is **not** on this list: register writes, arbitrary bus transactions,
+GPIO driving and stimulus generation are all supported, because they are how a
+component is actually investigated.
 
-| Constraint | Where |
-|-----------|-------|
-| GPIO6–11 (ESP32 SPI flash) rejected outright | `checkPins()` + agent `pinIsUsable()` |
-| Input-only pins refused for output signals | `checkPins()` |
-| The same pin refused for two signals | `checkPins()` |
-| SPI chip-select must be named explicitly | `spiDiscovery()`, `validateBusOptions()` |
-| UART RX must be named explicitly | `uartDiscovery()`, `validateBusOptions()` |
-| UART0 refused (carries the agent link) | `uartDiscovery()` |
-| UART active mode requires a declared component | `uartDiscovery()` |
-| SPI restricted to named probe profiles | `SPI_PROBE_PROFILES` |
-| Clear-on-read registers never read | `isSafeToInspect()` |
-| Write-only registers never read | `isSafeToInspect()` |
-| Probes emitting bytes must justify it | `validateProfile()` |
-| Benchmark iterations capped at the profile limit | `componentBenchmark()` |
-| Experiment repetitions capped | `MAX_REPETITIONS` |
-| Every operation bounded by length and timeout | agent firmware |
+### Voltage
 
-**Voltage levels are never assumed.** The system reports what pins are configured
-and refuses reserved ones; it makes no claim about logic levels, and level shifting
-remains the operator's responsibility.
-
----
+**Voltage levels are never assumed.** The system reports which pins are
+configured and refuses the ones that are electrically reserved; it makes no claim
+about logic levels. Level shifting and supply compatibility remain the operator's
+responsibility, and the MCP cannot detect a mismatch.
 
 ## Testing strategy
 
@@ -684,7 +846,7 @@ serial transport with a `MockTransport` driven by a scripted handler table.
 npm test      # compiles src + tests to .test-build/, runs node:test
 ```
 
-200 tests across 31 suites cover:
+269 tests across 43 suites cover:
 
 | Area | Coverage |
 |------|----------|
@@ -704,76 +866,81 @@ Every suite tests both success and failure paths.
 
 ---
 
-## Worked example: PN532 on an ESP32 DevKitC-32
+## Worked examples
 
-### Wiring
+No component is canonical. The two examples below show the same instrument used
+on a part with a profile and a part without one.
 
-| PN532 | ESP32 DevKitC-32 |
-|-------|------------------|
-| VCC | 3V3 |
-| GND | GND |
-| SDA | GPIO21 |
-| SCL | GPIO22 |
+### A. An unknown component on I2C — no profile, no identity
 
-Set the PN532 breakout's interface selector to **I2C** (usually DIP switch 1=ON,
-2=OFF). The interface is set by hardware strapping and cannot be read back over the
-bus — the profile lists this under `limitations`.
-
-### Procedure
+The case the system is built for.
 
 ```
-1.  esp32_hardware_inventory
-      → confirm ESP32, revision, MAC, 2 I2C controllers (DOCUMENTED)
+1.  esp32_pin_capabilities
+      -> which pins can do what; what is reserved; what the firmware has allocated
 
-2.  esp32_interface_discovery
-      → confirm default SDA=21, SCL=22 as the firmware reports them
+2.  esp32_hardware_execute
+      { "operations": [{ "op": "I2C_SCAN", "bus": { "sda": 21, "scl": 22 } }] }
+      -> which addresses acknowledge
 
-3.  esp32_i2c_scan { repeats: 3, fingerprint: true }
-      → expect 0x24 RESPONDS, with a LOW-confidence address-only hint for pn532
+3.  esp32_hardware_execute
+      { "operations": [{ "op": "I2C_READ", "address": <found>, "length": 8 }] }
+      -> what a plain read returns, if anything
 
-4.  esp32_component_identify { interface: "I2C", address: 36 }
-      → expect pn532, confidence HIGH, evidence "D5 03 32" signature + ACK frame
+4.  esp32_register_inspect
+      { "address": <found>, "registers": [0, 1, 2, ... ] }
+      -> raw values across a register sweep, undecoded
 
-5.  esp32_component_probe { component: "pn532", depth: "DEEP" }
-      → identification, connectivity, all safe probes, CIU register inspection,
-        capability matrix, timing
+5.  esp32_hardware_execute  (repetitions: 10)
+      -> which values are stable and which change
 
-6.  esp32_component_capabilities { component: "pn532", depth: "DEEP" }
-      → the matrix + gap analysis
+6.  esp32_register_inspect
+      { "address": <found>,
+        "writes": [{ "register": <r>, "value": [<v>],
+                     "justification": "Test whether <r> is writable" }] }
+      -> whether the write is acknowledged and whether the read-back changes
 
-7.  esp32_component_test { component: "pn532", depth: "DEEP" }
-      → identity, communication, status reporting, register readback
-
-8.  esp32_component_benchmark { component: "pn532" }
-      → latency, polling rate, response consistency
-
-9.  esp32_hardware_experiment {
-      objective: "Establish PN532 identity stability across power-cycle-free repeats",
-      targetComponent: "pn532", address: 36, repetitions: 10 }
-      → consistency analysis + full reproducibility record
+7.  esp32_hardware_execute
+      { "operations": [{ "op": "STIMULUS_CAPTURE", ... }] }
+      -> whether an interrupt line moves in response to a stimulus
 ```
+
+Each step's result shapes the next. Nothing here requires knowing what the part
+is, and step 6 can discover a writable register no datasheet mentions.
+
+### B. A component with a profile — accelerated, not constrained
+
+```
+1.  esp32_hardware_inventory        -> confirm the ESP32 itself
+2.  esp32_i2c_scan                  -> find responders, with LOW-confidence address hints
+3.  esp32_component_identify        -> score the evidence against known profiles
+4.  esp32_component_probe (DEEP)    -> profile-driven probes, registers, capability matrix
+5.  esp32_component_capabilities    -> DOCUMENTED vs OBSERVED vs VERIFIED, plus gaps
+6.  esp32_component_test            -> promote capabilities to VERIFIED where tests pass
+7.  esp32_component_benchmark       -> measured vs documented maxima
+8.  esp32_hardware_execute          -> investigate anything the profile does not cover
+```
+
+Step 8 is the point. A profile accelerates steps 3-7; it does not bound step 8.
 
 ### What a complete baseline establishes
 
-Well beyond "I2C address detected":
-
-- Exact communication interface and its working configuration
-- Device identification with named evidence and a confidence level
-- Firmware version, revision and supported-protocol mask from `GetFirmwareVersion`
-- Readable configuration (CIU_TxMode, CIU_RxMode) and status (CIU_Status2) registers
-- Documented capabilities — protocols, modes, features — from the profile
-- Which of those were actually **observed** on this unit
-- Which were **verified** by a functional test
-- Response latency and polling rate, with the measurement's limits stated
-- Error and edge-case behaviour
-- **Capability gaps**: what the datasheet promises that this firmware does not expose
-- **Unexplored areas**: what nothing has touched yet
-
-Only after that baseline does proposing firmware development make sense.
-
----
+- exact communication interface and working configuration
+- device identification with named evidence and a confidence level — or an
+  honest UNIDENTIFIED
+- readable configuration and status
+- what was actually **observed** on this unit, separate from what is documented
+- what was **verified** by a test that met a stated expectation
+- performance characteristics, with the measurement's limits stated
+- error and edge-case behaviour
+- capability gaps: what is claimed but unproven, and what is unexplored
+- undocumented behaviour found by experiment
 
 ## Adding a component profile
+
+A profile is optional. Add one when you want to *accelerate* repeated work on a
+part — decoded bitfields, named probes, expected responses, a capability matrix.
+You never need one to investigate.
 
 1. Create `src/hardware/profiles/<part>.ts` exporting a `ComponentProfile`.
 2. Add it to `BUILT_IN_PROFILES` in `src/hardware/profiles/index.ts`.
@@ -797,4 +964,7 @@ registerProfile(myProfile);   // throws on a malformed profile
 - [ ] Reset values come from the datasheet, with a `reference`
 - [ ] `limitations` honestly states what the profile *cannot* establish
 - [ ] Capabilities the hardware has but no driver implements are marked `softwareSupported: false` — that is what produces a `SOFTWARE_GAP`
-- [ ] Deeper or slower probes carry a `minDepth`
+- [ ] Deeper or slower probes carry a `minDepth` (scheduling guidance, not a limit)
+- [ ] No identification rule is entirely wildcards — such a rule matches any
+      response of that length and manufactures confidence out of nothing
+      (rejected at registration)
