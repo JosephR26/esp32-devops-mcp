@@ -14,7 +14,26 @@
       "mcp__esp32-devops__esp32_quick_benchmark",
       "mcp__esp32-devops__esp32_detect_memory_leaks",
       "mcp__esp32-devops__esp32_test_firmware",
-      "mcp__esp32-devops__esp32_validate_deployment"
+      "mcp__esp32-devops__esp32_validate_deployment",
+      "mcp__esp32-devops__esp32_create_project",
+      "mcp__esp32-devops__esp32_validate_project",
+      "mcp__esp32-devops__esp32_list_libraries",
+      "mcp__esp32-devops__esp32_run_tests",
+      "mcp__esp32-devops__esp32_parse_logs",
+      "mcp__esp32-devops__esp32_generate_ota_image",
+      "mcp__esp32-devops__esp32_list_network_devices",
+      "mcp__esp32-devops__esp32_hardware_inventory",
+      "mcp__esp32-devops__esp32_interface_discovery",
+      "mcp__esp32-devops__esp32_i2c_scan",
+      "mcp__esp32-devops__esp32_spi_discovery",
+      "mcp__esp32-devops__esp32_uart_discovery",
+      "mcp__esp32-devops__esp32_component_identify",
+      "mcp__esp32-devops__esp32_component_probe",
+      "mcp__esp32-devops__esp32_register_inspect",
+      "mcp__esp32-devops__esp32_component_capabilities",
+      "mcp__esp32-devops__esp32_component_test",
+      "mcp__esp32-devops__esp32_component_benchmark",
+      "mcp__esp32-devops__esp32_hardware_experiment"
     ]
   }
 }

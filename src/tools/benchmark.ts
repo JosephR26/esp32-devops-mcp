@@ -8,7 +8,20 @@ import { parseBenchmarkOutput } from '../utils/parser.js';
 import { validateSerialPort, validateBaudRate, validateDuration } from '../utils/validation.js';
 import type { PerformanceBenchmark } from '../types/index.js';
 
-const SCRIPT_PATH = getTestingScriptPath('performance-benchmark.py');
+/**
+ * Resolve the performance-benchmark.py script path lazily.
+ *
+ * Resolved per call rather than at module load so that a missing
+ * FIRMWARE_TOOLKIT_PATH degrades to a per-tool error instead of preventing the
+ * whole MCP server from starting.
+ */
+function resolveScript(): { path: string; error?: never } | { path?: never; error: string } {
+  try {
+    return { path: getTestingScriptPath('performance-benchmark.py') };
+  } catch (error: any) {
+    return { error: error.message };
+  }
+}
 
 /**
  * Run performance benchmark on ESP32 firmware
@@ -52,8 +65,13 @@ export async function runBenchmark(
   args.push('--duration', duration.toString());
   args.push('--baudrate', baudRate.toString());
 
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { success: false, error: script.error };
+  }
+
   // Execute benchmark
-  const result = await executePython(SCRIPT_PATH, args, {
+  const result = await executePython(script.path, args, {
     timeout: (duration + 30) * 1000 // Duration + 30s buffer
   });
 

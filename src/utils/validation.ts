@@ -68,6 +68,73 @@ export function sanitizePath(path: string): string {
   return path.replace(/[;&|`$()]/g, '');
 }
 
+// ---------------------------------------------------------------------------
+// Hardware interrogation validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a GPIO number.
+ * Bounds only — whether a specific pin is safe on a specific chip is decided by
+ * the ESP32 catalog, which knows the reserved ranges per family.
+ */
+export function validateGpioPin(pin: number): boolean {
+  return Number.isInteger(pin) && pin >= 0 && pin <= 48;
+}
+
+/** Validate a 7-bit I2C address. */
+export function validateI2CAddress(address: number): boolean {
+  return Number.isInteger(address) && address >= 0x00 && address <= 0x7f;
+}
+
+/** Validate an I2C bus frequency (1 kHz to 1 MHz). */
+export function validateI2CFrequency(frequencyHz: number): boolean {
+  return Number.isFinite(frequencyHz) && frequencyHz >= 1000 && frequencyHz <= 1000000;
+}
+
+/** Validate an SPI clock frequency (10 kHz to 40 MHz). */
+export function validateSpiClock(clockHz: number): boolean {
+  return Number.isFinite(clockHz) && clockHz >= 10000 && clockHz <= 40000000;
+}
+
+/** Validate an SPI mode (0-3). */
+export function validateSpiMode(mode: number): boolean {
+  return Number.isInteger(mode) && mode >= 0 && mode <= 3;
+}
+
+/**
+ * Validate an arbitrary UART baud rate for a probed device.
+ * Wider than validateBaudRate, which constrains the host console link to the
+ * rates the FirmwareToolkit scripts accept.
+ */
+export function validateProbeBaudRate(baud: number): boolean {
+  return Number.isInteger(baud) && baud >= 300 && baud <= 3000000;
+}
+
+/** Validate a component identifier before it is used to look up a profile. */
+export function validateComponentIdentifier(identifier: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9._+/-]{0,63}$/.test(identifier);
+}
+
+/** Validate a capture or timeout duration in milliseconds. */
+export function validateDurationMs(ms: number, maxMs = 120000): boolean {
+  return Number.isFinite(ms) && ms > 0 && ms <= maxMs;
+}
+
+/** Validate an iteration count for repeated measurements. */
+export function validateIterations(count: number, maxCount = 500): boolean {
+  return Number.isInteger(count) && count >= 1 && count <= maxCount;
+}
+
+/** Validate a byte array intended for transmission on a bus. */
+export function validateByteArray(bytes: unknown, maxLength = 512): bytes is number[] {
+  return (
+    Array.isArray(bytes) &&
+    bytes.length > 0 &&
+    bytes.length <= maxLength &&
+    bytes.every((b) => Number.isInteger(b) && b >= 0 && b <= 0xff)
+  );
+}
+
 /**
  * Validate and sanitize command line arguments
  */

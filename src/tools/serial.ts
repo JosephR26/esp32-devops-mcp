@@ -8,7 +8,21 @@ import { parseSerialPorts } from '../utils/parser.js';
 import { validateSerialPort } from '../utils/validation.js';
 import type { SerialPort } from '../types/index.js';
 
-const SCRIPT_PATH = getPythonScriptPath('serial-port-manager.py');
+/**
+ * Resolve the port-manager script path lazily.
+ *
+ * Resolved per call rather than at module load so that a missing
+ * FIRMWARE_TOOLKIT_PATH degrades to a per-tool error instead of preventing the
+ * whole MCP server from starting. Tools that need no toolkit (hardware
+ * interrogation, log parsing, OTA packaging) stay usable either way.
+ */
+function resolveScript(): { path: string; error?: never } | { path?: never; error: string } {
+  try {
+    return { path: getPythonScriptPath('serial-port-manager.py') };
+  } catch (error: any) {
+    return { error: error.message };
+  }
+}
 
 /**
  * List all available ESP32 serial ports
@@ -19,7 +33,12 @@ export async function listSerialPorts(): Promise<{
   recommended?: string;
   error?: string;
 }> {
-  const result = await executePython(SCRIPT_PATH, ['--list']);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { ports: [], error: script.error };
+  }
+
+  const result = await executePython(script.path, ['--list']);
 
   if (!result.success) {
     return {
@@ -50,7 +69,12 @@ export async function detectESP32Ports(): Promise<{
   ports: SerialPort[];
   error?: string;
 }> {
-  const result = await executePython(SCRIPT_PATH, ['--detect']);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { ports: [], error: script.error };
+  }
+
+  const result = await executePython(script.path, ['--detect']);
 
   if (!result.success) {
     return {
@@ -97,7 +121,12 @@ export async function setDefaultPort(port: string): Promise<{
     };
   }
 
-  const result = await executePython(SCRIPT_PATH, ['--set-default', port]);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { success: false, error: script.error };
+  }
+
+  const result = await executePython(script.path, ['--set-default', port]);
 
   return {
     success: result.success,
@@ -127,7 +156,12 @@ export async function addFavoritePort(
     args.push('--name', name);
   }
 
-  const result = await executePython(SCRIPT_PATH, args);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { success: false, error: script.error };
+  }
+
+  const result = await executePython(script.path, args);
 
   return {
     success: result.success,
@@ -149,7 +183,12 @@ export async function removeFavoritePort(port: string): Promise<{
     };
   }
 
-  const result = await executePython(SCRIPT_PATH, ['--remove-favorite', port]);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { success: false, error: script.error };
+  }
+
+  const result = await executePython(script.path, ['--remove-favorite', port]);
 
   return {
     success: result.success,
@@ -164,7 +203,12 @@ export async function getRecommendedPort(): Promise<{
   port?: string;
   error?: string;
 }> {
-  const result = await executePython(SCRIPT_PATH, ['--get-recommended']);
+  const script = resolveScript();
+  if (script.error !== undefined) {
+    return { error: script.error };
+  }
+
+  const result = await executePython(script.path, ['--get-recommended']);
 
   if (!result.success || !result.stdout) {
     return {
