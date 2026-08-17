@@ -449,6 +449,19 @@ export const PN532_PROFILE: ComponentProfile = {
     'I2C reads are prefixed by a ready-status byte; frame offsets in raw captures shift by one accordingly.',
     'Interface selection is set by hardware DIP switches or strapping on most breakout boards and cannot be read back over the bus.',
     'Card emulation and peer-to-peer modes are not exercised by interrogation — they require an RF counterpart.',
+
+    // The following were established against physical hardware. Each one produces a
+    // symptom that reads as a fault in something else, which is why they are recorded
+    // here rather than left for the next person to rediscover.
+
+    'A command is answered in TWO parts: an ACK frame first, then the response once ready. A single read returns the ACK plus stale bytes and decodes as nonsense.',
+    'The read buffer retains the PREVIOUS response. Bytes following a short frame are residue, not part of the current frame, and they decode plausibly enough to be mistaken for data. Trust the declared frame length.',
+    'InListPassiveTarget defaults to MxRtyPassiveActivation = 0xFF, meaning retry forever. With no target in the field the command never returns and the ready byte stays 0x00 — indistinguishable from a broken device. Cap retries with RFConfiguration item 0x05 first, so "no target" comes back as NbTg=0, which is a result rather than a hang.',
+    'A command already in flight is aborted by writing a bare ACK frame: 00 00 FF 00 FF 00.',
+    'SAMConfiguration should be issued after power-up before polling; some boards will not activate a target without it.',
+    'Size reads generously. An ISO14443-4 activation carrying an ATS ran to 34 bytes on real hardware, and a 28-byte read truncated it mid-ATS.',
+
+    'The PN532 operates at 13.56 MHz ONLY. Low-frequency credentials (125 kHz EM4100, HID Prox and similar — most door-entry and building fobs) are in a different band and cannot be detected at any range. A poll returning NbTg=0 with such a fob present is correct behaviour, not a failure, and no amount of repositioning will change it.',
   ],
 
   documentation: [
