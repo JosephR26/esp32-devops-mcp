@@ -1,10 +1,10 @@
 /**
- * Host-side input handling: project path validation and USB-serial bridge
- * identification.
+ * Host-side input handling: project path validation, USB-serial bridge
+ * identification, and Python interpreter discovery.
  *
  * The cases come from tests/fixtures/host-strings.ts — strings real machines
- * actually emit. Both bugs covered here passed every synthetic test and failed
- * on first contact with a real host, so the fixture is the test data rather than
+ * actually emit. Every bug covered here passed the synthetic tests and failed on
+ * first contact with a real host, so the fixture is the test data rather than
  * something tidier invented alongside it.
  */
 
@@ -18,6 +18,11 @@ import {
   parseSerialPorts,
 } from '../src/utils/parser.js';
 import {
+  DEFAULT_PYTHON_COMMANDS,
+  executePython,
+  resolvePythonCommand,
+} from '../src/utils/exec.js';
+import {
   PORT_DESCRIPTIONS,
   PROJECT_PATHS,
   STORE_ALIAS_PYTHON3,
@@ -25,22 +30,11 @@ import {
 
 describe('project path validation against real host paths', () => {
   for (const { path, valid, provenance, note } of PROJECT_PATHS) {
-    const label = path === '' ? '(empty string)' : JSON.stringify(path);
+    const label = path.trim() === '' ? JSON.stringify(path) : JSON.stringify(path);
     it(`${valid ? 'accepts' : 'rejects'} ${label} [${provenance}]${note ? ` — ${note}` : ''}`, () => {
       assert.equal(validateProjectPath(path), valid);
     });
   }
-
-  it('accepts every observed path', () => {
-    // Narrower than the sweep above and deliberately so: a path this project has
-    // actually used must never be rejected, whatever else changes.
-    const observed = PROJECT_PATHS.filter((p) => p.provenance === 'observed');
-    assert.ok(observed.length > 0, 'fixture should carry observed paths');
-
-    for (const { path } of observed) {
-      assert.equal(validateProjectPath(path), true, `observed path rejected: ${path}`);
-    }
-  });
 });
 
 describe('USB-serial bridge identification against real port descriptions', () => {
@@ -50,29 +44,6 @@ describe('USB-serial bridge identification against real port descriptions', () =
       assert.equal(looksLikeEsp32Port(description), isEsp32);
     });
   }
-
-  it('never claims a host-internal or virtual port is an ESP32', () => {
-    // The failure that mattered: a platform UART reported as a board. Any
-    // regression here can send a flash at the wrong device.
-    for (const { description, isEsp32 } of PORT_DESCRIPTIONS.filter((p) => !p.isEsp32)) {
-      assert.equal(
-        looksLikeEsp32Port(description),
-        false,
-        `wrongly identified as an ESP32: ${description}`
-      );
-      assert.equal(isEsp32, false);
-    }
-  });
-
-  it('identifies a bridge for every port expected to carry one', () => {
-    for (const { description, bridge } of PORT_DESCRIPTIONS.filter((p) => p.isEsp32)) {
-      assert.equal(
-        identifyUsbSerialBridge(description),
-        bridge,
-        `bridge mismatch for: ${description}`
-      );
-    }
-  });
 
   it('does not identify a bridge in an empty description', () => {
     assert.equal(identifyUsbSerialBridge(''), null);
@@ -100,25 +71,130 @@ describe('serial port list parsing', () => {
   });
 });
 
-describe('fixture integrity', () => {
-  it('records provenance for every entry', () => {
-    // The fixture is only worth having if 'observed' means observed. Guard the
-    // shape so an entry cannot be added without saying where it came from.
-    for (const entry of [...PORT_DESCRIPTIONS, ...PROJECT_PATHS]) {
-      assert.ok(
-        entry.provenance === 'observed' || entry.provenance === 'representative',
-        `missing or invalid provenance: ${JSON.stringify(entry)}`
-      );
-    }
+/**
+ * These assert on the FIXTURE, not on the code under test.
+ *
+ * The sweeps above already check each entry's expected result, so re-checking
+ * those expectations would be pure duplication. What a sweep cannot notice is a
+ * fixture that has quietly stopped encoding the intent — if every non-ESP32 port
+ * were deleted, the bridge sweep would still pass while covering nothing.
+ *
+ * Nor can the type system: `Provenance` already makes an invalid value a compile
+ * error and `provenance` is a required field, so a runtime check that it is one
+ * of two strings adds nothing. Presence of both KINDS is the part types cannot
+ * express, so that is what is checked here.
+ */
+describe('fixture coverage', () => {
+  it('carries ports that must NOT be identified as ESP32s', () => {
+    // The failure that mattered: a host platform UART reported as a board, which
+    // can send a flash at the wrong device.
+    const negatives = PORT_DESCRIPTIONS.filter((p) => !p.isEsp32);
+    assert.ok(negatives.length > 0, 'fixture should carry non-ESP32 ports');
+    assert.ok(
+      negatives.some((p) => /uart/i.test(p.description)),
+      'fixture should keep a non-ESP32 port whose description contains "UART"'
+    );
   });
 
-  it('keeps the Store alias case on record even though nothing asserts on it yet', () => {
-    // executePython hardcodes its candidate list, so this cannot be reproduced
-    // without injecting one. Keep the shape that broke fallback: present on PATH,
-    // so never ENOENT, but exits non-zero having run nothing.
-    assert.equal(STORE_ALIAS_PYTHON3.exitCode, 9009);
+  it('carries ports that must be identified as ESP32s', () => {
+    assert.ok(
+      PORT_DESCRIPTIONS.some((p) => p.isEsp32),
+      'fixture should carry ESP32-bearing ports'
+    );
+  });
+
+  it('carries both valid and invalid paths, including absolute Windows ones', () => {
+    assert.ok(PROJECT_PATHS.some((p) => p.valid), 'fixture should carry valid paths');
+    assert.ok(PROJECT_PATHS.some((p) => !p.valid), 'fixture should carry invalid paths');
+    assert.ok(
+      PROJECT_PATHS.some((p) => p.valid && /^[a-zA-Z]:\\/.test(p.path)),
+      'fixture should carry an absolute Windows path with backslashes'
+    );
+    assert.ok(
+      PROJECT_PATHS.some((p) => p.valid && /^[a-zA-Z]:\//.test(p.path)),
+      'fixture should carry an absolute Windows path with forward slashes'
+    );
+  });
+
+  it('stays grounded in strings from real machines', () => {
+    // 'representative' entries are realistic but unwitnessed. If the fixture ever
+    // becomes entirely representative it has stopped being evidence.
+    assert.ok(
+      PORT_DESCRIPTIONS.some((p) => p.provenance === 'observed'),
+      'fixture should keep observed port descriptions'
+    );
+    assert.ok(
+      PROJECT_PATHS.some((p) => p.provenance === 'observed'),
+      'fixture should keep observed paths'
+    );
+  });
+
+  it('marks every observed path as valid', () => {
+    // A path this project has really used must not be recorded as one the
+    // validator should reject.
+    for (const entry of PROJECT_PATHS.filter((p) => p.provenance === 'observed')) {
+      assert.equal(entry.valid, true, `observed path marked invalid: ${entry.path}`);
+    }
+  });
+});
+
+describe('python interpreter discovery', () => {
+  /** A probe standing in for a set of interpreters that exist on a host. */
+  const probeFor = (usable: readonly string[]) => async (command: string) =>
+    usable.includes(command);
+
+  it('skips a candidate that exists but exits non-zero', async () => {
+    // The Microsoft Store alias: present on PATH, so never ENOENT, but it runs
+    // nothing and exits 9009. The original loop treated any non-ENOENT failure as
+    // "the script ran and failed" and gave up, reporting Python as missing while a
+    // working `python` sat next in the list.
     assert.notEqual(STORE_ALIAS_PYTHON3.exitCode, 0);
-    assert.match(STORE_ALIAS_PYTHON3.stdout, /Python was not found/);
-    assert.equal(STORE_ALIAS_PYTHON3.provenance, 'observed');
+
+    const probe = async (command: string) => command !== 'python3';
+    const resolved = await resolvePythonCommand(DEFAULT_PYTHON_COMMANDS, probe);
+
+    assert.equal(resolved, 'python');
+  });
+
+  it('returns the first usable candidate in order', async () => {
+    assert.equal(
+      await resolvePythonCommand(['python3', 'python', 'py'], probeFor(['python3', 'python'])),
+      'python3'
+    );
+    assert.equal(
+      await resolvePythonCommand(['python3', 'python', 'py'], probeFor(['py'])),
+      'py'
+    );
+  });
+
+  it('returns null when no candidate is usable', async () => {
+    assert.equal(await resolvePythonCommand(DEFAULT_PYTHON_COMMANDS, probeFor([])), null);
+  });
+
+  it('propagates a throwing probe rather than treating it as unusable', async () => {
+    // PythonProbe's contract is to return false, never to throw — which is why
+    // the default probe converts every failure mode into false itself. A probe
+    // that throws is a bug in the caller, so it surfaces instead of being
+    // silently reinterpreted as "this interpreter is missing".
+    const throwing = async (command: string) => {
+      if (command === 'python3') throw new Error('spawn failed');
+      return true;
+    };
+
+    await assert.rejects(
+      resolvePythonCommand(DEFAULT_PYTHON_COMMANDS, throwing),
+      /spawn failed/
+    );
+  });
+
+  it('reports Python as missing only when every candidate failed', async () => {
+    const result = await executePython('script.py', [], { pythonProbe: async () => false });
+
+    assert.equal(result.success, false);
+    assert.match(result.stderr, /Python not found/);
+  });
+
+  it('tries python3, python, then py by default', () => {
+    assert.deepEqual([...DEFAULT_PYTHON_COMMANDS], ['python3', 'python', 'py']);
   });
 });

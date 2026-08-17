@@ -166,6 +166,18 @@ export const PROJECT_PATHS: readonly ProjectPathFixture[] = [
     note: 'Parentheses must not be treated as shell metacharacters.',
   },
   {
+    path: 'C:/projects/firmware',
+    valid: true,
+    provenance: 'representative',
+    note: 'Windows absolute path with forward slashes — accepted by the Win32 API, and produced by tools that normalise separators.',
+  },
+  {
+    path: 'C:/projects/../../Windows',
+    valid: false,
+    provenance: 'representative',
+    note: 'Traversal must be caught on forward slashes too, not just backslashes.',
+  },
+  {
     path: '/home/user/projects/firmware',
     valid: true,
     provenance: 'representative',
