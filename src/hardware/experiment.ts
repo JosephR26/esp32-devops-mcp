@@ -25,25 +25,46 @@ import {
   type HardwareTransport,
   type ObservedValue,
   type ProbeExecutionResult,
+  type Esp32Family,
+  type RawOperation,
   type ReproducibilityRecord,
   type SafeProbe,
 } from '../types/hardware.js';
 import { knownValue, timestamp, unknownValue } from './evidence.js';
 import { matchBytePattern, mean, stdDev, toHex } from './patterns.js';
 import { executeProbe, type ProbeContext } from './probe.js';
+import { executeOperation, type OperationContext } from './operations.js';
 import { findProbe } from './registry.js';
 
 /** Version reported in reproducibility records. Kept in step with package.json. */
-export const MCP_VERSION = '1.2.0';
+export const MCP_VERSION = '1.3.0';
 
 /** Upper bound on repetitions, so a REPEAT phase cannot run unbounded. */
 export const MAX_REPETITIONS = 50;
 
 export interface ExperimentContext extends ProbeContext {
   profile?: ComponentProfile | null;
+  /** Chip family, used to validate inline operations against real pin capability. */
+  family?: Esp32Family;
+  /** Default bus configuration applied to inline operations. */
+  operationDefaults?: OperationContext['defaults'];
   /** Reproducibility facts gathered before the experiment started. */
   reproducibility?: Partial<ReproducibilityRecord>;
 }
+
+/**
+ * A prepared step: either a profile probe or a caller-constructed operation.
+ * The runner treats both identically once resolved.
+ */
+type ResolvedStep = {
+  label: string;
+  critical: boolean;
+  expectPattern?: string;
+  expectMinBytes?: number;
+} & (
+  | { kind: 'PROBE'; probe: SafeProbe | null }
+  | { kind: 'OPERATION'; operation: RawOperation }
+);
 
 class PhaseRecorder {
   private readonly records: ExperimentPhaseRecord[] = [];
@@ -275,48 +296,79 @@ export async function runExperiment(
 
   const safetyConstraints = [
     ...(definition.safetyConstraints ?? []),
-    'Read-first: no register writes are issued outside declared, justified probes.',
-    'No unknown GPIO is driven; every pin used is named in the configuration.',
+    'Every pin used is named explicitly in the configuration — none is chosen implicitly.',
+    'Operations are validated against this chip\'s real pin and peripheral capabilities.',
+    'A successful operation is OBSERVED evidence; promotion to VERIFIED requires the result ' +
+      'to match a stated expectation.',
   ];
 
   // --- PREPARE -----------------------------------------------------------
   const prepare = phases.begin('PREPARE');
   const profile = ctx.profile ?? null;
   const probesById = new Map<string, SafeProbe>();
-  const resolvedSteps: { probe: SafeProbe | null; probeId: string; critical: boolean }[] = [];
+  const resolvedSteps: ResolvedStep[] = [];
 
   for (const step of definition.procedure) {
-    const probe = profile ? findProbe(profile, step.probeId) : null;
+    // An inline operation resolves without any profile; a probeId resolves
+    // against one when it is present. Both are first-class.
+    if (step.operation) {
+      resolvedSteps.push({
+        kind: 'OPERATION',
+        operation: step.operation,
+        label: step.description ?? step.operation.op,
+        critical: step.critical ?? false,
+        ...(step.expectPattern !== undefined ? { expectPattern: step.expectPattern } : {}),
+        ...(step.expectMinBytes !== undefined ? { expectMinBytes: step.expectMinBytes } : {}),
+      });
+      continue;
+    }
+
+    const probe = step.probeId && profile ? findProbe(profile, step.probeId) : null;
     if (probe) probesById.set(probe.id, probe);
     resolvedSteps.push({
+      kind: 'PROBE',
       probe,
-      probeId: step.probeId,
+      label: step.probeId ?? '(no probeId or operation)',
       critical: step.critical ?? false,
+      ...(step.expectPattern !== undefined ? { expectPattern: step.expectPattern } : {}),
+      ...(step.expectMinBytes !== undefined ? { expectMinBytes: step.expectMinBytes } : {}),
     });
   }
 
-  const unresolved = resolvedSteps.filter((s) => s.probe === null);
+  const unresolved = resolvedSteps.filter((s) => s.kind === 'PROBE' && s.probe === null);
+  const inlineCount = resolvedSteps.filter((s) => s.kind === 'OPERATION').length;
+
   if (definition.procedure.length === 0) {
     prepare.fail('Experiment procedure is empty.', ['No steps to execute']);
     errors.push('Experiment procedure is empty.');
   } else if (unresolved.length === definition.procedure.length) {
+    // Only a hard failure when nothing at all is runnable. An experiment made of
+    // inline operations never reaches this branch.
     prepare.fail(
       profile
-        ? `None of the ${definition.procedure.length} step(s) resolved to a probe in profile ${profile.id}.`
-        : 'No component profile supplied, so no step could be resolved to a probe.',
-      unresolved.map((s) => `Unknown probe: ${s.probeId}`)
+        ? `None of the ${definition.procedure.length} step(s) named a probe present in profile ${profile.id}.`
+        : 'No step could be resolved: each named a probeId, but no component profile was supplied.',
+      [
+        ...unresolved.map((s) => `Unresolved probe: ${s.label}`),
+        'Supply an inline `operation` on each step to run it without a profile.',
+      ]
     );
-    errors.push('No experiment step could be resolved to a declared safe probe.');
+    errors.push(
+      'No experiment step was runnable. Steps may name a profile probe, or carry an inline ' +
+        'operation that needs no profile.'
+    );
   } else {
     if (unresolved.length > 0) {
       warnings.push(
-        `${unresolved.length} step(s) reference probes not present in the profile and will be skipped: ` +
-          unresolved.map((s) => s.probeId).join(', ')
+        `${unresolved.length} step(s) name probes absent from the profile and will be skipped: ` +
+          unresolved.map((s) => s.label).join(', ')
       );
     }
+    const resolvedCount = resolvedSteps.length - unresolved.length;
     prepare.ok(
-      `Resolved ${resolvedSteps.length - unresolved.length}/${resolvedSteps.length} step(s)` +
-        (profile ? ` against profile ${profile.id}.` : '.'),
+      `Resolved ${resolvedCount}/${resolvedSteps.length} step(s)` +
+        (inlineCount > 0 ? ` (${inlineCount} inline operation(s))` : '') +
+        (profile ? ` against profile ${profile.id}.` : ' with no component profile.'),
       warnings
     );
   }
@@ -358,24 +410,64 @@ export async function runExperiment(
     for (let repetition = 1; repetition <= repetitions && !abort; repetition++) {
       for (let stepIndex = 0; stepIndex < resolvedSteps.length; stepIndex++) {
         const step = resolvedSteps[stepIndex];
-        if (!step.probe) continue;
 
-        const result = await executeProbe(step.probe, ctx);
+        let ok: boolean;
+        let raw: ExperimentObservation['raw'];
+        let durationMs: number;
+        let stepError: string | undefined;
+        let bytes: number[];
+
+        if (step.kind === 'PROBE') {
+          if (!step.probe) continue;
+          const result = await executeProbe(step.probe, ctx);
+          ok = result.success;
+          raw = result.raw;
+          durationMs = result.durationMs;
+          stepError = result.error;
+          bytes = result.bytes;
+        } else {
+          // Inline operation: validated against the chip, executed as written.
+          const outcome = await executeOperation(step.operation, {
+            transport: ctx.transport,
+            family: ctx.family ?? 'UNKNOWN',
+            ...(ctx.operationDefaults !== undefined ? { defaults: ctx.operationDefaults } : {}),
+            ...(ctx.timeoutMs !== undefined ? { timeoutMs: ctx.timeoutMs } : {}),
+          });
+          ok = outcome.ok;
+          raw = outcome.raw;
+          durationMs = outcome.durationMs;
+          stepError = outcome.error;
+          bytes = outcome.bytes;
+        }
+
+        // A step-level expectation lets an inline operation carry a pass
+        // criterion, exactly as a profile probe's `expect` does.
+        if (ok && step.expectPattern !== undefined) {
+          ok = matchBytePattern(bytes, step.expectPattern);
+          if (!ok) {
+            stepError = `Response ${toHex(bytes)} does not match "${step.expectPattern}"`;
+          }
+        }
+        if (ok && step.expectMinBytes !== undefined && bytes.length < step.expectMinBytes) {
+          ok = false;
+          stepError = `Received ${bytes.length} byte(s); expected at least ${step.expectMinBytes}`;
+        }
+
         executed++;
         observations.push({
           stepIndex,
-          probeId: step.probeId,
+          probeId: step.label,
           repetition,
-          raw: result.raw,
-          durationMs: result.durationMs,
-          ok: result.success,
-          ...(result.error !== undefined ? { error: result.error } : {}),
+          raw,
+          durationMs,
+          ok,
+          ...(stepError !== undefined ? { error: stepError } : {}),
         });
 
-        if (!result.success && step.critical) {
+        if (!ok && step.critical) {
           abort = true;
           errors.push(
-            `Critical step ${stepIndex} (${step.probeId}) failed: ${result.error ?? 'no response'}`
+            `Critical step ${stepIndex} (${step.label}) failed: ${stepError ?? 'no response'}`
           );
           break;
         }

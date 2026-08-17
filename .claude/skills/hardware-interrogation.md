@@ -25,6 +25,8 @@ allowed-tools:
   - mcp__esp32-devops__esp32_component_test
   - mcp__esp32-devops__esp32_component_benchmark
   - mcp__esp32-devops__esp32_hardware_experiment
+  - mcp__esp32-devops__esp32_hardware_execute
+  - mcp__esp32-devops__esp32_pin_capabilities
   - mcp__esp32-devops__esp32_get_recommended_port
   - mcp__esp32-devops__esp32_list_ports
   - Read
@@ -33,17 +35,47 @@ allowed-tools:
 
 # /hardware-interrogation
 
-Systematically determine what physical hardware attached to an ESP32 actually is,
-and what it actually supports.
+Use the ESP32 as a general-purpose physical instrument to investigate whatever is
+attached to it.
 
-## The rule that governs everything here
+```
+You  ->  ESP32 DevOps MCP  ->  ESP32 DevKitC-32  ->  the component
+```
 
-**Never claim a capability has been verified because a datasheet says the component
-supports it.**
+## Two rules govern everything here
 
-Documentation is a claim. A measurement is a fact. They are different, they live in
-different fields of every report this system produces, and you must keep them
-different in what you tell the user.
+**1. Never claim a capability has been verified because a datasheet says so.**
+
+Documentation is a claim. A measurement is a fact. They live in different fields of
+every report, and you must keep them different in what you tell the user.
+
+**2. A missing component profile means UNKNOWN, never FORBIDDEN.**
+
+The MCP exposes capabilities; it does not prescribe the investigation. If no
+profile exists for the part in front of you, you are not blocked — you are simply
+without a shortcut. Use `esp32_hardware_execute` and investigate directly.
+
+Do not tell the user a component cannot be investigated because it is not in a
+catalogue. That is never true.
+
+## The general-purpose path
+
+`esp32_hardware_execute` runs operations you construct. It needs no profile, no
+predefined probe and no prior identification:
+
+- **I2C** — scan, read, write arbitrary bytes, write-read with repeated start and delay
+- **SPI** — arbitrary TX bytes, read length, mode 0-3, clock, bit order, CS control
+- **UART** — arbitrary bytes, baud, framing, timeout
+- **GPIO** — configure, read, drive, pulse, multi-pin sampling on one timebase
+- **Timing** — pulse width, frequency, edge waiting
+- **ADC** — sampling with interval and attenuation
+- **PWM** — waveform stimulus
+- **STIMULUS_CAPTURE** — drive one pin while sampling others, to correlate cause and effect
+
+`esp32_pin_capabilities` tells you what each pin can actually do before you plan.
+
+An operation is refused only when physically invalid on the chip. If you get a
+rejection, read its `kind` — it names the physical reason and often a remedy.
 
 ## Vocabulary you must use precisely
 
@@ -122,7 +154,7 @@ Read the scan carefully. The six I2C states mean different things:
 `possibleMatches` are **address-only hints with LOW confidence**. Never report an
 address match as an identification. Many unrelated parts share any given address.
 
-### 5. Identify the component
+### 5. Identify the component — or proceed without an identity
 
 `esp32_component_identify`
 
@@ -134,17 +166,25 @@ Read the result honestly:
 - `ambiguous: true` → two candidates are too close to separate. Report both, and say neither is established.
 - `confidence: "LOW"` → a lead, not a conclusion.
 
-### 6. Select interrogation depth
+**An unidentified component is not a dead end.** Switch to the generic path:
+scan, read raw, sweep registers, repeat for stability, probe with writes, and
+correlate signals. Steps 6-13 below assume a profile; without one, run the
+equivalent operations through `esp32_hardware_execute` and record what you see.
+
+### 6. Select an interrogation depth preset
 
 | Use | When |
 |-----|------|
 | `BASIC` | "Is it there?" — connectivity and identification |
 | `STANDARD` | Normal first pass — adds configuration, modes, capability matrix |
-| `DEEP` | Full baseline — adds every safe register, feature discovery, timing |
+| `DEEP` | Full baseline — adds every declared register, feature discovery, timing |
 | `FORENSIC` | Investigating an anomaly — adds repeated measurement, consistency, anomaly detection |
 
-`FORENSIC` means deeper observation, **not** destructive action. Nothing at any
-depth writes a register.
+**These are presets, not ceilings.** `FORENSIC` is the most thorough default, not
+the limit of what you may do. After any depth you can always run another
+experiment. To go further within the tool: `additionalProbes`,
+`additionalOperations`, `inspectRegisters: true`. To go further still:
+`esp32_hardware_execute`.
 
 Default to `DEEP` when the user asks for a baseline or a full picture.
 
@@ -157,11 +197,21 @@ device returned `D5 03 32 01 06 07`, which matches the documented
 GetFirmwareVersion response — IC 0x32, version 1, revision 6" is a good sentence.
 "It's a PN532" alone is not.
 
-### 8. Inspect safe configuration and status
+### 8. Inspect configuration and status
 
 `esp32_register_inspect`
 
-This is READ-ONLY. Report decoded bitfields with their documented meanings.
+Reads need no profile — pass numeric `registers` and get raw values. With a
+profile, the same values come back decoded into named bitfields. Registers the
+profile does not describe are still read, raw.
+
+**Writes are available** via `writes`, as explicit experiments: entering a mode,
+selecting a bank, triggering a measurement, clearing status, or testing
+undocumented behaviour. Each records the bytes sent, the acknowledgement, the
+value before, and the state after.
+
+A bus ACK means the device accepted the bytes. It does **not** mean the device did
+what you intended. Read back and compare, and report it that way.
 
 Registers listed under `skipped` were deliberately not read — clear-on-read or
 write-only. Mention that they were skipped and why; do not present them as
@@ -250,6 +300,23 @@ Say plainly what has not been touched and what it would take to touch it.
 Not before. A firmware proposal grounded in a real baseline is useful; one grounded
 in a datasheet reading is a guess with extra steps.
 
+## Adaptive investigation
+
+The MCP does no reasoning — you do. It provides expressive primitives and returns
+rich observations, and you close the loop:
+
+```
+OBSERVE -> HYPOTHESISE -> EXPERIMENT -> OBSERVE -> COMPARE -> HYPOTHESISE -> ...
+```
+
+Nothing requires the whole investigation to be planned up front. Run a small
+sequence, read the raw bytes, and let the result shape the next call. When a
+response surprises you, that is the interesting part — retain it and investigate
+further rather than discarding it as noise.
+
+A response that no documentation explains is an **UNDOCUMENTED OBSERVATION**. It
+is real data. Report it as observed, not as specification.
+
 ---
 
 ## Running an experiment
@@ -310,6 +377,8 @@ Report the failure mode specifically, and do not over-read it:
 - **Bus errors** — pull-ups, bus contention, or wrong voltage domain.
 - **Degenerate SPI response** (all 0x00 / all 0xFF) — that is a floating MISO line, not data.
 - **Empty UART capture** — an idle device, wrong baud, swapped TX/RX and a missing common ground all look identical from here.
+- **Operation rejected** — read the rejection `kind`. It names a physical reason (`PIN_RESERVED`, `PIN_NOT_ADC_CAPABLE`, `PARAMETER_OUT_OF_RANGE`, ...) and often a remedy. It never means "not allowed to try".
+- **`UNSUPPORTED_BY_AGENT`** — the firmware build lacks that operation. Check `esp32_pin_capabilities` → `unavailable`, and reflash the agent if needed.
 
 Never present a failure as a finding about the component when it is equally
 explicable as a wiring fault.

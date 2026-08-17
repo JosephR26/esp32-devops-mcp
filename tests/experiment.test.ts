@@ -180,8 +180,11 @@ describe('experiment lifecycle', () => {
     });
 
     assert.ok(report.safetyConstraints.includes('Do not exceed 100 kHz'));
-    assert.ok(report.safetyConstraints.some((c) => /no register writes/i.test(c)));
-    assert.ok(report.safetyConstraints.some((c) => /No unknown GPIO is driven/i.test(c)));
+    // The retained constraints are the ones that are actually true: explicit pin
+    // naming, validation against real silicon, and the OBSERVED/VERIFIED split.
+    assert.ok(report.safetyConstraints.some((c) => /named explicitly/i.test(c)));
+    assert.ok(report.safetyConstraints.some((c) => /real pin and peripheral capabilities/i.test(c)));
+    assert.ok(report.safetyConstraints.some((c) => /OBSERVED evidence/i.test(c)));
   });
 
   it('records everything needed to reproduce the run', async () => {
@@ -230,15 +233,23 @@ describe('experiment lifecycle', () => {
     assert.ok(report.errors.some((e) => /No procedure steps/.test(e)));
   });
 
-  it('rejects an unknown target component', async () => {
+  it('warns but does not fail when the target component has no profile', async () => {
     useMock(PN532_I2C_HANDLERS);
     const report = await hardwareExperiment({
       port: '/dev/ttyUSB0',
-      objective: 'Unknown part',
+      objective: 'Investigate an unknown part',
       targetComponent: 'no-such-part',
+      address: 0x24,
+      procedure: [
+        { operation: { op: 'I2C_READ', address: 0x24, length: 4 }, description: 'raw read' },
+      ],
     });
-    assert.equal(report.success, false);
-    assert.match(report.error!, /No registered component profile/);
+
+    // No profile exists, yet the experiment still runs: the inline operation
+    // needs nothing from a profile.
+    assert.equal(report.success, true);
+    assert.ok(report.observations.length > 0);
+    assert.ok(report.warnings.some((w) => /No registered profile matches/.test(w)));
   });
 
   it('defaults the procedure to the profile probes when none is supplied', async () => {

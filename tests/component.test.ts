@@ -405,7 +405,11 @@ describe('esp32_component_probe', () => {
 
     assert.equal(report.probes.length, 0);
     assert.equal(report.capabilities, null);
-    assert.ok(report.warnings.some((w) => /No component profile could be resolved/.test(w)));
+    // A missing profile is a starting point, not a dead end: the report must say
+    // how to continue rather than implying the component is off limits.
+    assert.ok(report.warnings.some((w) => /starting point, not a limit/.test(w)));
+    assert.ok(report.warnings.some((w) => /esp32_hardware_execute/.test(w)));
+    assert.ok(report.warnings.some((w) => /UNKNOWN, not forbidden/.test(w)));
   });
 
   it('reports an unreachable device without claiming it is absent', async () => {
@@ -487,11 +491,25 @@ describe('esp32_register_inspect', () => {
     assert.equal(modem.value, 0x86 & 0b111);
   });
 
-  it('explains that a profile with no register map is a command-protocol device', async () => {
+  it('asks for explicit registers when the profile declares no register map', async () => {
     const report = await registerInspect({ port: '/dev/ttyUSB0', component: 'eeprom-24cxx' });
+    assert.equal(report.success, false);
+    assert.match(report.error!, /supply numeric `registers`/);
+  });
+
+  it('reads raw registers with no component profile at all', async () => {
+    useMock(MPU6050_I2C_HANDLERS);
+    const report = await registerInspect({
+      port: '/dev/ttyUSB0',
+      address: 0x68,
+      registers: [0x75],
+    });
+
     assert.equal(report.success, true);
-    assert.equal(report.registers.length, 0);
-    assert.ok(report.warnings.some((w) => /declares no register map/.test(w)));
+    assert.equal(report.registers.length, 1);
+    assert.equal(report.registers[0].rawValue.value, 0x68);
+    assert.equal(report.registers[0].name, 'REG_0x75');
+    assert.deepEqual(report.registers[0].fields, [], 'no profile means no field decoding');
   });
 
   it('warns when the requested register does not exist in the profile', async () => {
@@ -505,10 +523,18 @@ describe('esp32_register_inspect', () => {
     assert.ok(report.warnings.some((w) => /None of the requested registers exist/.test(w)));
   });
 
-  it('rejects an unknown component', async () => {
-    const report = await registerInspect({ port: '/dev/ttyUSB0', component: 'not-a-real-part' });
-    assert.equal(report.success, false);
-    assert.match(report.error!, /No registered component profile/);
+  it('proceeds with raw reads when the named component has no profile', async () => {
+    useMock(MPU6050_I2C_HANDLERS);
+    const report = await registerInspect({
+      port: '/dev/ttyUSB0',
+      component: 'not-a-real-part',
+      address: 0x68,
+      registers: [0x75],
+    });
+
+    assert.equal(report.success, true, 'an unknown part is investigable, not blocked');
+    assert.equal(report.registers.length, 1);
+    assert.ok(report.warnings.some((w) => /reported raw rather than decoded/.test(w)));
   });
 
   it('flags registers that differ from their documented reset values', async () => {

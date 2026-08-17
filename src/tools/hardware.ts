@@ -19,6 +19,7 @@ import {
   validateI2CAddress,
   validateI2CFrequency,
   validateProbeBaudRate,
+  validateByteArray,
   validateProjectPath,
   validateSpiClock,
   validateSpiMode,
@@ -1140,7 +1141,13 @@ function failedScan(
 // 4. esp32_spi_discovery
 // ===========================================================================
 
-/** Named SPI probe profiles. Arbitrary command sequences are deliberately absent. */
+/**
+ * Convenience SPI presets.
+ *
+ * These are shortcuts for common opening moves, NOT a restriction: `tx` accepts
+ * any byte sequence, and a preset is simply a named starting point. Anything a
+ * preset can do, an explicit `tx` can do too.
+ */
 export const SPI_PROBE_PROFILES = {
   IDLE_READ: {
     description:
@@ -1174,6 +1181,14 @@ export interface SpiDiscoveryOptions {
   clockHz?: number;
   bitOrder?: SpiBitOrder;
   profiles?: string[];
+  /**
+   * Arbitrary bytes to clock out. Any value is permitted — this is the
+   * general-purpose path, and it needs no preset and no component profile.
+   */
+  tx?: number[];
+  /** Extra bytes to clock in after `tx`, filled with `padByte`. */
+  readLength?: number;
+  padByte?: number;
   component?: string;
   transactionSize?: number;
   timeoutMs?: number;
@@ -1223,16 +1238,24 @@ export async function spiDiscovery(
     errors.push(`Invalid component identifier: ${options.component}`);
   }
 
-  const requestedProfiles = (options.profiles ?? ['IDLE_READ', 'ZERO_READ']).map((p) =>
-    p.toUpperCase()
-  );
+  // Presets are the default opening move only when the caller has not supplied
+  // explicit bytes. An explicit `tx` takes precedence over any preset.
+  const defaultProfiles = options.tx !== undefined ? [] : ['IDLE_READ', 'ZERO_READ'];
+  const requestedProfiles = (options.profiles ?? defaultProfiles).map((p) => p.toUpperCase());
   const unknownProfiles = requestedProfiles.filter((p) => !(p in SPI_PROBE_PROFILES));
   if (unknownProfiles.length > 0) {
     errors.push(
-      `Unknown SPI probe profile(s): ${unknownProfiles.join(', ')}. ` +
-        `Available: ${Object.keys(SPI_PROBE_PROFILES).join(', ')}. ` +
-        'Arbitrary command sequences are not supported by design.'
+      `Unknown SPI preset(s): ${unknownProfiles.join(', ')}. ` +
+        `Available presets: ${Object.keys(SPI_PROBE_PROFILES).join(', ')}. ` +
+        'To send bytes no preset covers, pass them directly as `tx` — any byte sequence is ' +
+        'accepted.'
     );
+  }
+  if (options.tx !== undefined && !validateByteArray(options.tx)) {
+    errors.push('tx must be an array of 1-512 integers in the range 0-255.');
+  }
+  if (options.readLength !== undefined && (options.readLength < 0 || options.readLength > 512)) {
+    errors.push('readLength must be 0-512.');
   }
 
   if (errors.length > 0) return failedSpi(options, errors);
@@ -1263,6 +1286,65 @@ export async function spiDiscovery(
     clockHz,
     lsbFirst: bitOrder === 'LSB_FIRST',
   };
+
+  // --- Arbitrary caller-supplied bytes -----------------------------------
+  if (options.tx !== undefined) {
+    const response = await session.transport.request<{ bytes?: number[]; durationUs?: number }>(
+      'spi.transfer',
+      {
+        ...spiParams,
+        tx: options.tx,
+        ...(options.readLength !== undefined ? { readLength: options.readLength } : {}),
+        ...(options.padByte !== undefined ? { padByte: options.padByte } : {}),
+      },
+      { ...(timeoutMs !== undefined ? { timeoutMs } : {}) }
+    );
+
+    const rx =
+      response.ok && Array.isArray(response.data?.bytes)
+        ? response.data!.bytes!.map((b) => b & 0xff)
+        : [];
+    const degenerate = isDegenerateResponse(rx);
+
+    raw.push(
+      rawInterpretation(
+        response.raw,
+        rx,
+        response.ok
+          ? `SPI arbitrary transfer: TX ${toHex(options.tx)} -> RX ${toHex(rx)}`
+          : `SPI arbitrary transfer failed: ${response.error}`,
+        response.ok ? 'DEVICE_RESPONSE' : 'NONE',
+        response.ok && !degenerate ? 'HIGH' : 'LOW'
+      )
+    );
+
+    if (response.ok) {
+      probes.push({
+        probeId: 'ARBITRARY',
+        description: `Caller-supplied transfer of ${options.tx.length} byte(s)`,
+        mode: mode as 0 | 1 | 2 | 3,
+        clockHz,
+        bitOrder,
+        tx: options.tx,
+        rx,
+        rxHex: toHex(rx),
+        degenerate,
+        repeated: rx.length > 1 && new Set(rx).size === 1,
+        durationMs: response.durationMs,
+        raw: rawInterpretation(
+          response.raw,
+          rx,
+          degenerate
+            ? `Uniform ${toHex([rx[0] ?? 0])} response — consistent with a floating MISO line.`
+            : `Received ${toHex(rx)}`,
+          'DEVICE_RESPONSE',
+          degenerate ? 'LOW' : 'HIGH'
+        ),
+      });
+    } else {
+      warnings.push(`Arbitrary SPI transfer failed: ${response.error ?? 'unknown error'}`);
+    }
+  }
 
   for (const name of requestedProfiles as SpiProbeProfileName[]) {
     const profile = SPI_PROBE_PROFILES[name];
@@ -1484,6 +1566,13 @@ export interface UartDiscoveryOptions {
   mode?: 'PASSIVE' | 'ACTIVE';
   component?: string;
   scanBauds?: boolean;
+  /**
+   * Arbitrary bytes to transmit in ACTIVE mode. Any byte sequence is accepted —
+   * no component profile and no documented command set is required.
+   */
+  transmit?: number[];
+  /** Bytes to read back after transmitting. */
+  readLength?: number;
   timeoutMs?: number;
 }
 
@@ -1519,7 +1608,7 @@ export async function uartDiscovery(
   if (options.tx !== undefined && !validateGpioPin(options.tx)) errors.push(`Invalid tx pin: ${options.tx}`);
   if (!validateProbeBaudRate(baud)) errors.push(`Baud out of range (300 - 3000000): ${baud}`);
   if (!validateDurationMs(durationMs, 30000)) errors.push('durationMs must be 1-30000');
-  if (![7, 8].includes(dataBits)) errors.push('dataBits must be 7 or 8');
+  if (![5, 6, 7, 8].includes(dataBits)) errors.push('dataBits must be 5, 6, 7 or 8');
   if (![1, 2].includes(stopBits)) errors.push('stopBits must be 1 or 2');
   if (!['none', 'even', 'odd'].includes(parity)) errors.push('parity must be none, even or odd');
   if (flowControl !== 'none') {
@@ -1530,11 +1619,17 @@ export async function uartDiscovery(
   if (controller !== 1 && controller !== 2) {
     errors.push('controller must be 1 or 2 — UART0 carries the interrogation agent link.');
   }
-  if (mode === 'ACTIVE' && !options.component) {
+  if (mode === 'ACTIVE' && options.transmit === undefined && !options.component) {
     errors.push(
-      'ACTIVE mode requires a `component` whose profile declares what may be transmitted. ' +
-        'Sending unsolicited bytes to an unidentified UART peer is not permitted.'
+      'ACTIVE mode needs something to send: supply `transmit` bytes, or name a `component` ' +
+        'whose profile carries UART probes.'
     );
+  }
+  if (options.transmit !== undefined && !validateByteArray(options.transmit)) {
+    errors.push('transmit must be an array of 1-512 integers in the range 0-255.');
+  }
+  if (mode === 'ACTIVE' && options.transmit !== undefined && options.tx === undefined) {
+    errors.push('Transmitting requires a `tx` pin.');
   }
   if (options.component !== undefined && !validateComponentIdentifier(options.component)) {
     errors.push(`Invalid component identifier: ${options.component}`);
@@ -1642,6 +1737,40 @@ export async function uartDiscovery(
   const componentProfile = options.component ? findProfile(options.component) : null;
   if (options.component && !componentProfile) {
     warnings.push(`No registered component profile matches "${options.component}".`);
+  }
+
+  if (mode === 'ACTIVE' && options.transmit !== undefined) {
+    const response = await session.transport.request<{ bytes?: number[] }>(
+      'uart.writeRead',
+      {
+        ...uartParams,
+        baud: effectiveBaud,
+        write: options.transmit,
+        readLength: options.readLength ?? 64,
+        timeoutMs: options.timeoutMs ?? 1000,
+      },
+      { timeoutMs: (options.timeoutMs ?? 1000) + 4000 }
+    );
+
+    raw.push(
+      rawInterpretation(
+        response.raw,
+        response.data,
+        response.ok
+          ? `Sent ${toHex(options.transmit)}; received ${
+              Array.isArray(response.data?.bytes) ? response.data!.bytes!.length : 0
+            } byte(s)`
+          : `Active transmit failed: ${response.error}`,
+        response.ok ? 'DEVICE_RESPONSE' : 'NONE',
+        response.ok ? 'HIGH' : 'UNKNOWN'
+      )
+    );
+
+    if (response.ok && Array.isArray(response.data?.bytes)) {
+      bytes.push(...response.data!.bytes!.map((b) => b & 0xff));
+    } else if (!response.ok) {
+      warnings.push(`Active transmit failed: ${response.error ?? 'unknown error'}`);
+    }
   }
 
   if (mode === 'ACTIVE' && componentProfile) {

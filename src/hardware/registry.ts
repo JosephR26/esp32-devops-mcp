@@ -165,6 +165,17 @@ export function validateProfile(profile: ComponentProfile): void {
   }
 
   for (const rule of profile.identification) {
+    // A pattern of nothing but wildcards matches any response of that length,
+    // so it contributes score without contributing evidence.
+    if (rule.match.kind === 'PROBE_RESPONSE' || rule.match.kind === 'REGISTER_VALUE') {
+      const tokens = rule.match.pattern.trim().split(/[\s,]+/).filter(Boolean);
+      if (tokens.length > 0 && tokens.every((t) => ['??', '*', 'xx', 'XX'].includes(t))) {
+        throw new Error(
+          `Profile ${profile.id}: identification rule "${rule.id}" is entirely wildcards, so it ` +
+            'matches any response of that length. Remove it, or match a real signature.'
+        );
+      }
+    }
     if (rule.weight <= 0 || rule.weight > 1) {
       throw new Error(
         `Profile ${profile.id}: identification rule "${rule.id}" weight must be in (0, 1]`

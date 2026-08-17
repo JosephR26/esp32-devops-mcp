@@ -245,6 +245,14 @@ export type HardwareInterfaceKind =
   | 'BLUETOOTH'
   | 'UNKNOWN';
 
+/**
+ * Depth presets, ordered by how much investigation they perform by default.
+ *
+ * These are starting points, not ceilings. FORENSIC is the most thorough
+ * preset — it is not the maximum possible investigation, and nothing prevents
+ * further experiments after any depth completes. To go beyond a preset, name
+ * additional probes or construct operations directly.
+ */
 export type InterrogationDepth = 'BASIC' | 'STANDARD' | 'DEEP' | 'FORENSIC';
 
 export const INTERROGATION_DEPTHS: readonly InterrogationDepth[] = [
@@ -549,8 +557,11 @@ export type ProbeOperation =
  * A read-oriented probe declared by a component profile.
  *
  * A probe that emits bytes onto the bus must set `writes: true` and supply a
- * `writeJustification`. Probes never write device configuration registers —
- * that path is deliberately absent from the system.
+ * `writeJustification`, so a profile's declared operations are self-documenting.
+ *
+ * Profile probes are a curated, reusable set — they are not the only way to
+ * reach the hardware. Arbitrary transactions, including register writes, go
+ * through RawOperation via esp32_hardware_execute or esp32_register_inspect.
  */
 export interface SafeProbe {
   id: string;
@@ -697,15 +708,41 @@ export interface RegisterInspectionResult {
   error?: string;
 }
 
+/** Record of one explicit, caller-requested register write. */
+export interface RegisterWriteRecord {
+  register: number;
+  registerHex: string;
+  value: number[];
+  valueHex: string;
+  /** The caller's stated reason. Recorded verbatim, never validated. */
+  justification?: string;
+  /** Whether the device acknowledged the bytes on the bus. */
+  acknowledged: boolean;
+  busStatus: string;
+  /** Value read immediately before the write, when it could be read. */
+  valueBeforeHex: string | null;
+  executed: boolean;
+  error?: string;
+  note: string;
+}
+
 export interface RegisterInspectionReport {
   success: boolean;
   componentId: string;
   partNumber: string;
   interface: HardwareInterfaceKind;
   address: number | null;
-  /** Always true — this tool has no write path. */
-  readOnly: true;
+  /**
+   * True when the call performed reads only. Writes happen only when the caller
+   * explicitly supplies them, so this reports what occurred rather than
+   * asserting a policy.
+   */
+  readOnly: boolean;
   registers: RegisterInspectionResult[];
+  /** Writes performed, when the caller requested any. */
+  writes?: RegisterWriteRecord[];
+  /** Registers re-read after the writes, so the effect is observable. */
+  registersAfterWrite?: RegisterInspectionResult[];
   skipped: { address: string; reason: string }[];
   warnings: string[];
   raw: RawInterpretation[];
@@ -762,6 +799,8 @@ export interface ComponentProbeReport {
   anomalies: AnomalyRecord[];
   modes: OperatingMode[];
   protocols: ProtocolDescriptor[];
+  /** Outcomes of caller-constructed operations run alongside the profile probes. */
+  additionalOperations?: OperationOutcome[];
   timing: { operation: string; samples: number[]; meanMs: number; jitterMs: number }[];
   warnings: string[];
   errors: string[];
@@ -908,12 +947,29 @@ export interface TelemetryRequirement {
   required: boolean;
 }
 
+/**
+ * One step of an experiment.
+ *
+ * A step is either a named probe from a component profile (the accelerated
+ * path) or a raw operation constructed inline (the general path). Neither is
+ * privileged: an experiment can mix them freely, and an experiment made
+ * entirely of inline operations needs no profile at all.
+ */
 export interface ExperimentStep {
-  /** Probe id from the component profile, or a built-in operation name. */
-  probeId: string;
+  /** Probe id from the component profile. Mutually exclusive with `operation`. */
+  probeId?: string;
+  /** Raw operation constructed by the caller. Needs no profile. */
+  operation?: RawOperation;
   description?: string;
   /** Marks a step whose failure aborts the experiment. */
   critical?: boolean;
+  /**
+   * Byte pattern the response must match for this step to count as meeting its
+   * expectation. Lets an inline operation carry a pass criterion the way a
+   * profile probe does.
+   */
+  expectPattern?: BytePattern;
+  expectMinBytes?: number;
 }
 
 export interface ExperimentDefinition {
@@ -1140,4 +1196,284 @@ export interface HardwareTransport {
     options?: { timeoutMs?: number }
   ): Promise<TransportResult<T>>;
   describe(): TransportDescriptor;
+}
+
+// ---------------------------------------------------------------------------
+// Generic raw operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Arbitrary hardware operations, constructed by the caller at call time.
+ *
+ * These are the general-purpose primitives: the ESP32 as a physical instrument.
+ * Nothing here references a component profile, a probe definition, or a known
+ * command set. An operation is permitted when the requested configuration is
+ * physically valid on this chip — not when someone anticipated it.
+ *
+ * Validation is against silicon capability (pin exists, pin can drive, clock in
+ * range, peripheral available), never against a catalogue of expected devices.
+ */
+export type RawOperation =
+  // --- I2C ---------------------------------------------------------------
+  | {
+      op: 'I2C_SCAN';
+      bus?: I2CBusSpec;
+      startAddress?: number;
+      endAddress?: number;
+      repeats?: number;
+    }
+  | { op: 'I2C_READ'; bus?: I2CBusSpec; address: number; register?: number; length: number }
+  /** Write arbitrary bytes with no read phase. Includes register writes. */
+  | { op: 'I2C_WRITE'; bus?: I2CBusSpec; address: number; write: number[] }
+  | {
+      op: 'I2C_WRITE_READ';
+      bus?: I2CBusSpec;
+      address: number;
+      write: number[];
+      readLength: number;
+      /** Delay between the write and the read phase. */
+      delayMs?: number;
+      /** Emit a repeated START instead of a STOP between phases. */
+      repeatedStart?: boolean;
+    }
+  // --- SPI ---------------------------------------------------------------
+  | {
+      op: 'SPI_TRANSFER';
+      bus?: SpiBusSpec;
+      /** Arbitrary bytes clocked out. Any value is permitted. */
+      tx: number[];
+      /** Extra bytes to clock in after tx, using `padByte` as filler. */
+      readLength?: number;
+      padByte?: number;
+      /** Hold CS asserted across the whole transfer (default true). */
+      keepCsAsserted?: boolean;
+    }
+  // --- UART --------------------------------------------------------------
+  | { op: 'UART_WRITE'; bus?: UartBusSpec; write: number[] }
+  | { op: 'UART_READ'; bus?: UartBusSpec; durationMs: number; maxBytes?: number }
+  | {
+      op: 'UART_WRITE_READ';
+      bus?: UartBusSpec;
+      write: number[];
+      readLength: number;
+      timeoutMs: number;
+    }
+  // --- GPIO --------------------------------------------------------------
+  | { op: 'GPIO_CONFIGURE'; pin: number; mode: GpioMode }
+  | { op: 'GPIO_READ'; pins: number[] }
+  /** Drive a pin. Requires an output-capable pin; the caller names it explicitly. */
+  | { op: 'GPIO_WRITE'; pin: number; level: 0 | 1 }
+  | { op: 'GPIO_PULSE'; pin: number; level: 0 | 1; durationUs: number; returnToLevel?: 0 | 1 }
+  | {
+      op: 'GPIO_SAMPLE';
+      pins: number[];
+      samples: number;
+      intervalUs?: number;
+    }
+  /** Measure the width of a single pulse, like Arduino pulseIn. */
+  | { op: 'GPIO_MEASURE_PULSE'; pin: number; level: 0 | 1; timeoutUs?: number }
+  /** Count edges over a window and derive frequency. */
+  | { op: 'GPIO_MEASURE_FREQUENCY'; pin: number; windowMs: number; edge?: GpioEdge }
+  /** Block until an edge occurs, reporting how long it took. */
+  | { op: 'GPIO_WAIT_EDGE'; pin: number; edge: GpioEdge; timeoutMs: number }
+  // --- ADC ---------------------------------------------------------------
+  | {
+      op: 'ADC_READ';
+      pin: number;
+      samples?: number;
+      intervalUs?: number;
+      /** Attenuation selects the input range; family-dependent. */
+      attenuationDb?: 0 | 2.5 | 6 | 11;
+    }
+  // --- PWM / stimulus ----------------------------------------------------
+  | {
+      op: 'PWM_START';
+      pin: number;
+      frequencyHz: number;
+      /** Duty as a fraction of the resolution's full scale, 0..1. */
+      duty: number;
+      resolutionBits?: number;
+      /** Stop automatically after this long. Omit to leave it running. */
+      durationMs?: number;
+    }
+  | { op: 'PWM_STOP'; pin: number }
+  // --- Multi-signal ------------------------------------------------------
+  /**
+   * Drive a stimulus on one pin while sampling others, so cause and effect are
+   * captured on the same timebase. Correlation across signals is often the only
+   * way a component's behaviour becomes visible.
+   */
+  | {
+      op: 'STIMULUS_CAPTURE';
+      stimulus: {
+        pin: number;
+        kind: 'PULSE' | 'TOGGLE' | 'LEVEL';
+        level?: 0 | 1;
+        durationUs?: number;
+        cycles?: number;
+      };
+      capturePins: number[];
+      samples: number;
+      intervalUs?: number;
+    }
+  // --- Control -----------------------------------------------------------
+  | { op: 'DELAY'; ms: number };
+
+export type GpioMode =
+  | 'INPUT'
+  | 'INPUT_PULLUP'
+  | 'INPUT_PULLDOWN'
+  | 'OUTPUT'
+  | 'OUTPUT_OPEN_DRAIN';
+
+export type GpioEdge = 'RISING' | 'FALLING' | 'CHANGE';
+
+/** Bus configuration supplied per operation, so a sequence can switch buses. */
+export interface I2CBusSpec {
+  controller?: number;
+  sda?: number;
+  scl?: number;
+  frequencyHz?: number;
+}
+
+export interface SpiBusSpec {
+  controller?: number;
+  mosi?: number;
+  miso?: number;
+  sclk?: number;
+  cs?: number;
+  mode?: 0 | 1 | 2 | 3;
+  clockHz?: number;
+  bitOrder?: SpiBitOrder;
+}
+
+export interface UartBusSpec {
+  controller?: number;
+  tx?: number;
+  rx?: number;
+  baud?: number;
+  dataBits?: 5 | 6 | 7 | 8;
+  parity?: 'none' | 'even' | 'odd';
+  stopBits?: 1 | 2;
+}
+
+/** Why an operation was refused. Every value is a physical/config fact. */
+export type OperationRejectionKind =
+  | 'PIN_DOES_NOT_EXIST'
+  | 'PIN_RESERVED'
+  | 'PIN_NOT_OUTPUT_CAPABLE'
+  | 'PIN_NOT_ADC_CAPABLE'
+  | 'PIN_LACKS_PERIPHERAL'
+  | 'PIN_CONFLICT'
+  | 'PARAMETER_OUT_OF_RANGE'
+  | 'MALFORMED_ARGUMENTS'
+  | 'PERIPHERAL_UNAVAILABLE'
+  | 'UNSUPPORTED_BY_AGENT';
+
+export interface OperationRejection {
+  kind: OperationRejectionKind;
+  detail: string;
+  /** What would make the operation valid, when that is knowable. */
+  remedy?: string;
+}
+
+/** Result of one raw operation, with the raw capture always retained. */
+export interface OperationOutcome {
+  index: number;
+  op: RawOperation['op'];
+  /** Exactly what was requested, echoed for reproducibility. */
+  request: RawOperation;
+  /** Parameters actually sent to the agent. */
+  agentRequest: { op: string; params: Record<string, unknown> } | null;
+  executed: boolean;
+  ok: boolean;
+  /** Populated when the operation was refused before execution. */
+  rejections: OperationRejection[];
+  /** Bytes received, when the operation reads bytes. */
+  bytes: number[];
+  hex: string;
+  ascii: string | null;
+  /** Numeric samples, for ADC/GPIO sampling and timing operations. */
+  samples: number[];
+  /** Derived statistics over `samples`. Interpretation, not primary evidence. */
+  statistics: {
+    count: number;
+    min: number | null;
+    max: number | null;
+    mean: number | null;
+    median: number | null;
+    stdDev: number | null;
+  } | null;
+  /** Operation-specific structured data straight from the agent. */
+  data: Record<string, unknown> | null;
+  durationMs: number;
+  warnings: string[];
+  error?: string;
+  errorKind?: TransportErrorKind;
+  /** Primary evidence: the verbatim agent response. */
+  raw: RawInterpretation<number[]>;
+  timestamp: string;
+}
+
+/** A named sequence of raw operations plus the pins it touches. */
+export interface OperationSequenceResult {
+  success: boolean;
+  operations: OperationOutcome[];
+  executed: number;
+  rejected: number;
+  failed: number;
+  /** Pins the sequence used, and in what role. */
+  pinUsage: { gpio: number; roles: string[]; conflict: boolean }[];
+  warnings: string[];
+  errors: string[];
+  durationMs: number;
+  reproducibility: ReproducibilityRecord;
+  /**
+   * Evidence tier for a successful raw operation. Always OBSERVED — executing a
+   * caller-constructed operation shows what the device did, it does not verify
+   * what the device is.
+   */
+  evidenceTier: 'OBSERVED' | 'UNKNOWN';
+  notes: string[];
+  error?: string;
+}
+
+/** Per-pin capability and current allocation, for experiment planning. */
+export interface PinReport {
+  gpio: number;
+  usable: boolean;
+  unusableReason?: string;
+  digitalInput: boolean;
+  digitalOutput: boolean;
+  pwm: boolean;
+  adc: boolean;
+  dac: boolean;
+  touch: boolean;
+  matrixRoutable: boolean;
+  notes: string[];
+  /** Roles the running firmware currently reports for this pin. */
+  currentAllocation: string[];
+}
+
+export interface PinCapabilityReport {
+  success: boolean;
+  chip: ObservedValue<Esp32Family>;
+  pins: PinReport[];
+  summary: {
+    total: number;
+    usable: number;
+    reserved: number;
+    outputCapable: number;
+    adcCapable: number;
+    dacCapable: number;
+    touchCapable: number;
+  };
+  /** Peripheral counts from the datasheet — DOCUMENTED, not measured. */
+  peripherals: Record<string, ObservedValue<number | boolean | string>>;
+  /** Capabilities the agent firmware does not implement, stated explicitly. */
+  unavailable: { capability: string; reason: string }[];
+  warnings: string[];
+  notes: string[];
+  raw: RawInterpretation[];
+  error?: string;
 }

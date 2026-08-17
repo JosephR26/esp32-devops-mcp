@@ -25,6 +25,7 @@ import * as logTools from './tools/logs.js';
 import * as otaTools from './tools/ota.js';
 import * as hardwareTools from './tools/hardware.js';
 import * as componentTools from './tools/component.js';
+import * as executeTools from './tools/execute.js';
 
 /**
  * MCP Server instance
@@ -32,7 +33,7 @@ import * as componentTools from './tools/component.js';
 const server = new Server(
   {
     name: 'esp32-devops-mcp',
-    version: '1.2.0',
+    version: '1.3.0',
   },
   {
     capabilities: {
@@ -535,10 +536,29 @@ const tools = [
           description: 'Bit order (default: MSB_FIRST)',
           default: 'MSB_FIRST',
         },
+        tx: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'Arbitrary bytes to clock out. Any values are accepted — this is the ' +
+            'general-purpose path and needs no preset and no component profile. Supplying ' +
+            'this suppresses the default presets.',
+        },
+        readLength: {
+          type: 'number',
+          description: 'Extra bytes to clock in after `tx`, filled with `padByte`',
+        },
+        padByte: {
+          type: 'number',
+          description: 'Filler byte clocked out during the read phase (default: 0x00)',
+        },
         profiles: {
           type: 'array',
           items: { type: 'string', enum: ['IDLE_READ', 'ZERO_READ', 'JEDEC_ID'] },
-          description: 'Named probe profiles to run (default: ["IDLE_READ","ZERO_READ"])',
+          description:
+            'Convenience presets for common opening moves (default: ["IDLE_READ","ZERO_READ"] ' +
+            'when no `tx` is given). These are shortcuts, not a restriction — use `tx` for ' +
+            'anything else.',
         },
         component: {
           type: 'string',
@@ -561,7 +581,8 @@ const tools = [
       'valid, per-packet timestamps and boundaries, repeated patterns, baud clues and protocol ' +
       'candidates (NMEA 0183, UBX, AT, PN532 framing). Optionally scans common baud rates ' +
       'passively to find the working rate. Defaults to PASSIVE mode — nothing is transmitted. ' +
-      'ACTIVE mode requires a named component whose profile declares exactly what may be sent.',
+      'ACTIVE mode sends whatever you put in `transmit` (any bytes), or the UART probes of a ' +
+      'named component profile.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -574,7 +595,7 @@ const tools = [
         rx: { type: 'number', description: 'RX GPIO (REQUIRED)' },
         tx: { type: 'number', description: 'TX GPIO (optional, only needed for ACTIVE mode)' },
         baud: { type: 'number', description: 'Baud rate, 300-3000000 (default: 9600)', default: 9600 },
-        dataBits: { type: 'number', description: 'Data bits, 7 or 8 (default: 8)', default: 8 },
+        dataBits: { type: 'number', description: 'Data bits, 5-8 (default: 8)', default: 8 },
         parity: {
           type: 'string',
           enum: ['none', 'even', 'odd'],
@@ -585,8 +606,20 @@ const tools = [
         flowControl: {
           type: 'string',
           enum: ['none'],
-          description: 'Flow control — only "none" is supported',
+          description:
+            'Flow control. Only "none" is available — the agent does not implement RTS/CTS.',
           default: 'none',
+        },
+        transmit: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'Arbitrary bytes to send in ACTIVE mode. Any byte sequence is accepted — no ' +
+            'component profile or documented command set is required.',
+        },
+        readLength: {
+          type: 'number',
+          description: 'Bytes to read back after transmitting (default: 64)',
         },
         durationMs: {
           type: 'number',
@@ -723,12 +756,16 @@ const tools = [
   {
     name: 'esp32_register_inspect',
     description:
-      'STAGE 7-8 (REGISTER DISCOVERY, CONFIGURATION INSPECTION). READ-ONLY inspection of the ' +
-      'documented registers declared by a component profile. Returns register address, name, raw ' +
-      'value, hex, binary, decoded bitfields with their meanings, documented reset value, current ' +
-      'value, whether it has changed from reset, documentation reference and confidence. ' +
-      'Registers that are write-only, clear-on-read, or marked unsafe are SKIPPED with the reason ' +
-      'stated. This tool has no write path — not behind a flag, not behind a depth.',
+      'Register inspection and controlled register writing. Reads are the default and need NO ' +
+      'component profile: name numeric `registers` and get raw values back. Supply a ' +
+      '`component` and the same values are decoded into named bitfields with reset-value ' +
+      'comparison — a profile is a decoder, not a permission. Registers a profile does not ' +
+      'describe are still read, raw. WRITES: supply `writes` to perform explicit register ' +
+      'writes as experiments — entering a mode, selecting a bank, triggering a measurement, ' +
+      'clearing status, or testing undocumented behaviour. Each write records the bytes sent, ' +
+      'the bus acknowledgement, the value read immediately before, and (unless disabled) the ' +
+      'state read back afterwards. A bus ACK confirms the device accepted the bytes; it does ' +
+      'NOT establish that the device did what you intended — read back and compare.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -745,7 +782,35 @@ const tools = [
           type: 'array',
           items: { type: ['string', 'number'] },
           description:
-            'Register names or addresses to read (optional — reads every safe register if omitted)',
+            'Register names (needs a profile) or numeric addresses (needs nothing). Omit to read ' +
+            'every register the profile declares.',
+        },
+        writes: {
+          type: 'array',
+          description:
+            'Explicit register writes to perform. Each is executed as requested and recorded ' +
+            'with before/after state.',
+          items: {
+            type: 'object',
+            properties: {
+              register: { type: 'number', description: 'Register address 0-255' },
+              value: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Value bytes to write after the register address',
+              },
+              justification: {
+                type: 'string',
+                description: 'Why this write is being made. Recorded verbatim in the report.',
+              },
+            },
+            required: ['register', 'value'],
+          },
+        },
+        readBackAfterWrite: {
+          type: 'boolean',
+          description: 'Re-read the written registers afterwards (default: true)',
+          default: true,
         },
         sda: { type: 'number', description: 'SDA GPIO (I2C)' },
         scl: { type: 'number', description: 'SCL GPIO (I2C)' },
@@ -758,7 +823,7 @@ const tools = [
         clockHz: { type: 'number', description: 'SPI clock in Hz' },
         timeoutMs: { type: 'number', description: 'Request timeout in ms (optional)' },
       },
-      required: ['component'],
+      required: [],
     },
   },
   {
@@ -1001,6 +1066,175 @@ const tools = [
         timeoutMs: { type: 'number', description: 'Request timeout in ms (optional)' },
       },
       required: ['objective'],
+    },
+  },
+  {
+    name: 'esp32_hardware_execute',
+    description:
+      'GENERAL-PURPOSE HARDWARE EXECUTION. Runs arbitrary operations you construct against the ' +
+      'ESP32 as a physical instrument. Requires NO component profile, NO predefined probe and ' +
+      'NO prior identification — this is the path for investigating a component beyond anything ' +
+      'anticipated by this MCP. Supports: I2C scan/read/write/write-read with arbitrary bytes, ' +
+      'repeated start and inter-phase delay; SPI transfer with arbitrary TX bytes, read length, ' +
+      'mode, clock, bit order and CS control; UART write/read/write-read with arbitrary bytes ' +
+      'and framing; GPIO configure/read/write/pulse/multi-pin sampling; pulse-width, frequency ' +
+      'and edge-timing measurement; ADC sampling with interval and attenuation; PWM stimulus ' +
+      'generation; and STIMULUS_CAPTURE, which drives one pin while sampling others on a shared ' +
+      'timebase. An operation is refused ONLY when physically invalid on this chip (pin does ' +
+      'not exist, is wired to flash, cannot drive an output, parameter out of the silicon\'s ' +
+      'range, conflicting or malformed) — never because it was unanticipated. Raw agent ' +
+      'responses are retained verbatim on every operation. A successful operation is OBSERVED ' +
+      'evidence: it records what the device did, not what the device is.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operations: {
+          type: 'array',
+          description:
+            'Operations to run in order. Each has an `op` field selecting the kind. See the ' +
+            'RawOperation type for the full shape of each.',
+          items: {
+            type: 'object',
+            properties: {
+              op: {
+                type: 'string',
+                enum: [
+                  'I2C_SCAN', 'I2C_READ', 'I2C_WRITE', 'I2C_WRITE_READ',
+                  'SPI_TRANSFER',
+                  'UART_WRITE', 'UART_READ', 'UART_WRITE_READ',
+                  'GPIO_CONFIGURE', 'GPIO_READ', 'GPIO_WRITE', 'GPIO_PULSE', 'GPIO_SAMPLE',
+                  'GPIO_MEASURE_PULSE', 'GPIO_MEASURE_FREQUENCY', 'GPIO_WAIT_EDGE',
+                  'ADC_READ',
+                  'PWM_START', 'PWM_STOP',
+                  'STIMULUS_CAPTURE',
+                  'DELAY',
+                ],
+                description: 'Which operation to perform',
+              },
+              bus: {
+                type: 'object',
+                description: 'Per-operation bus configuration (pins, clock, mode, baud)',
+              },
+              address: { type: 'number', description: 'I2C address, 0x00-0x7F' },
+              register: { type: 'number', description: 'Register pointer for I2C_READ' },
+              length: { type: 'number', description: 'Bytes to read (I2C_READ)' },
+              write: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Arbitrary bytes to send. Any values are accepted.',
+              },
+              readLength: { type: 'number', description: 'Bytes to read back' },
+              delayMs: { type: 'number', description: 'Delay between write and read phases' },
+              repeatedStart: {
+                type: 'boolean',
+                description: 'Emit a repeated START instead of a STOP between I2C phases',
+              },
+              tx: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Arbitrary SPI bytes to clock out',
+              },
+              padByte: { type: 'number', description: 'Filler byte for the SPI read phase' },
+              keepCsAsserted: {
+                type: 'boolean',
+                description: 'Hold CS low across the whole SPI transfer (default true)',
+              },
+              pin: { type: 'number', description: 'Target GPIO for pin-oriented operations' },
+              pins: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'GPIOs to read or sample',
+              },
+              mode: {
+                type: 'string',
+                description: 'GPIO mode: INPUT, INPUT_PULLUP, INPUT_PULLDOWN, OUTPUT, OUTPUT_OPEN_DRAIN',
+              },
+              level: { type: 'number', description: 'Logic level 0 or 1' },
+              durationUs: { type: 'number', description: 'Pulse width in microseconds' },
+              returnToLevel: { type: 'number', description: 'Level to return to after a pulse' },
+              samples: { type: 'number', description: 'Number of samples to take' },
+              intervalUs: { type: 'number', description: 'Interval between samples' },
+              timeoutUs: { type: 'number', description: 'Timeout for pulse measurement' },
+              timeoutMs: { type: 'number', description: 'Timeout in milliseconds' },
+              windowMs: { type: 'number', description: 'Measurement window for frequency counting' },
+              edge: { type: 'string', enum: ['RISING', 'FALLING', 'CHANGE'] },
+              durationMs: { type: 'number', description: 'Capture or output duration' },
+              maxBytes: { type: 'number', description: 'Cap on captured UART bytes' },
+              attenuationDb: {
+                type: 'number',
+                description: 'ADC attenuation: 0, 2.5, 6 or 11 dB (selects the input range)',
+              },
+              frequencyHz: { type: 'number', description: 'PWM frequency' },
+              duty: { type: 'number', description: 'PWM duty as a fraction, 0.0-1.0' },
+              resolutionBits: { type: 'number', description: 'PWM resolution, 1-20 bits' },
+              stimulus: {
+                type: 'object',
+                description: 'Stimulus spec for STIMULUS_CAPTURE: pin, kind, level, durationUs, cycles',
+              },
+              capturePins: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Pins to sample while the stimulus runs',
+              },
+              ms: { type: 'number', description: 'Delay duration for DELAY' },
+            },
+            required: ['op'],
+          },
+        },
+        defaults: {
+          type: 'object',
+          description:
+            'Bus defaults merged into any operation omitting its own `bus`. Keys: i2c, spi, uart.',
+          properties: {
+            i2c: { type: 'object', description: 'controller, sda, scl, frequencyHz' },
+            spi: { type: 'object', description: 'mosi, miso, sclk, cs, mode, clockHz, bitOrder' },
+            uart: { type: 'object', description: 'controller, tx, rx, baud, dataBits, parity, stopBits' },
+          },
+        },
+        repetitions: {
+          type: 'number',
+          description:
+            'Run the whole sequence this many times, 1-100. Use this to judge stability — a ' +
+            'single run cannot establish it.',
+          default: 1,
+        },
+        stopOnError: {
+          type: 'boolean',
+          description: 'Stop at the first failure instead of continuing (default: false)',
+          default: false,
+        },
+        port: { type: 'string', description: 'Serial port (optional)' },
+        timeoutMs: { type: 'number', description: 'Per-operation timeout in ms (optional)' },
+      },
+      required: ['operations'],
+    },
+  },
+  {
+    name: 'esp32_pin_capabilities',
+    description:
+      'Report what every pin on this ESP32 can actually do — digital input/output, ADC, DAC, ' +
+      'touch, PWM and GPIO-matrix routability — plus which pins are reserved and why, which are ' +
+      'strapping pins, what the running firmware currently has allocated, and which agent ' +
+      'capabilities are unavailable on this firmware build. Use this to plan an experiment ' +
+      'instead of guessing pin assignments. The ESP32 GPIO matrix routes most peripheral ' +
+      'signals to most pins, so bus assignments are far more flexible than a board silkscreen ' +
+      'suggests. Pin capabilities are DOCUMENTED (datasheet-derived), not measured.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        port: { type: 'string', description: 'Serial port (optional)' },
+        pins: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'Restrict the report to these GPIOs (optional)',
+        },
+        filter: {
+          type: 'string',
+          enum: ['OUTPUT', 'ADC', 'DAC', 'TOUCH', 'PWM', 'USABLE'],
+          description: 'Only report pins supporting this capability (optional)',
+        },
+      },
+      required: [],
     },
   },
 ];
@@ -1354,6 +1588,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
+    if (name === 'esp32_hardware_execute') {
+      const result = await executeTools.hardwareExecute(
+        args as unknown as executeTools.HardwareExecuteOptions
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === 'esp32_pin_capabilities') {
+      const result = await executeTools.pinCapabilityReport(
+        args as executeTools.PinCapabilityOptions
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
     // Unknown tool
     throw new Error(`Unknown tool: ${name}`);
 
@@ -1381,7 +1629,7 @@ async function main() {
   await server.connect(transport);
 
   console.error('ESP32 DevOps MCP Server started');
-  console.error('Version: 1.2.0');
+  console.error('Version: 1.3.0');
   console.error(`Tools registered: ${tools.length}`);
   console.error('Toolkit path:', process.env.FIRMWARE_TOOLKIT_PATH || '[NOT SET - required for benchmarking/testing features]');
   console.error('Hardware interrogation requires the agent firmware (firmware/interrogation-agent/) and pyserial.');

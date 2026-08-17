@@ -4,7 +4,7 @@
 
 [![Featured on LobeHub](https://lobehub.com/badge/mcp--josephr26-esp32-devops-mcp?labelColor=black&color=black&style=flat-square&logo=&logoColor=white)](https://lobehub.com/mcp/josephr26-esp32-devops-mcp)
 
-Transform Claude Code into your personal ESP32 DevOps engineer — 33 tools covering the full development lifecycle from project scaffolding to OTA deployment, plus systematic interrogation of the physical hardware attached to your board.
+Transform Claude Code into your personal ESP32 DevOps engineer — 35 tools covering the full development lifecycle from project scaffolding to OTA deployment, plus the ESP32 as a general-purpose physical instrument for investigating whatever hardware you attach to it.
 
 ## Features
 
@@ -47,7 +47,27 @@ Transform Claude Code into your personal ESP32 DevOps engineer — 33 tools cove
 - Package built firmware with MD5 and SHA-256 checksums, ready for OTA
 - Discover ESP32 devices on the local network via mDNS (avahi / dns-sd) with ARP fallback
 
-### Hardware Interrogation (new in v1.2.0)
+### The ESP32 as a Physical Instrument (v1.3.0)
+
+```
+Claude  ->  ESP32 DevOps MCP  ->  ESP32 DevKitC-32  ->  your component
+```
+
+The MCP does not know what is attached, and does not need to. It exposes the
+ESP32's real capabilities and lets Claude construct whatever investigation the
+component's observable behaviour allows.
+
+- **`esp32_hardware_execute`** — arbitrary operations you construct: I2C scan/read/write/write-read with any bytes, SPI transfers with any TX and full bus control, UART with any framing, GPIO configure/drive/pulse/multi-pin sampling, pulse-width and frequency measurement, ADC sampling, PWM stimulus, and stimulus-capture across multiple signals on one timebase
+- **`esp32_pin_capabilities`** — what every pin can actually do, what is reserved and why, what is currently allocated, and which agent capabilities are unavailable
+- **Register writes** as explicit experiments, with before/after state recorded
+- **No component profile required** for any of it
+
+> **An operation is refused only when it is physically invalid on the chip** — a pin
+> that does not exist, one wired to flash, an input-only pin asked to drive, a
+> parameter outside the silicon's range, a conflict, or malformed arguments. Never
+> because nobody anticipated it. There is no allow-list of permitted commands.
+
+### Hardware Interrogation (v1.2.0)
 Answer *"what is this hardware and what does it actually support?"* — systematically,
 with evidence.
 
@@ -63,9 +83,14 @@ with evidence.
 - Full experiment lifecycle with machine-readable, reproducible reports
 - Ten component profiles out of the box — NFC, IMU, ADC, DAC, GPIO expander, display, EEPROM, radio, CAN, GNSS
 
-> **The rule that governs the whole subsystem:** a datasheet claim is never a verified
-> capability. Every value carries its evidence source and confidence, and anything that
-> cannot be determined is returned as `UNKNOWN` rather than guessed.
+> **Component profiles are optional knowledge, not permission.** A profile accelerates
+> investigation by naming registers, decoding bitfields and supplying expected responses.
+> A missing profile entry means **UNKNOWN**, not **FORBIDDEN** — everything remains
+> reachable through the generic primitives.
+
+> **A datasheet claim is never a verified capability.** Every value carries its evidence
+> source and confidence, and anything that cannot be determined is returned as `UNKNOWN`
+> rather than guessed.
 
 See **[docs/HARDWARE-INTERROGATION.md](docs/HARDWARE-INTERROGATION.md)** for the
 architecture, capability model, safety model and a worked PN532 example.
@@ -211,7 +236,7 @@ auto-activate the right tools based on what you ask. This repo ships six skills 
 | `/flash-target-device` | "flash the firmware", "upload to board", "build and flash" | `esp32_build`, `esp32_flash`, `esp32_full_cycle` |
 | `/run-firmware-tests` | "test firmware", "benchmark", "check memory leaks", "validate deployment" | `esp32_test_firmware`, `esp32_validate_deployment`, `esp32_benchmark`, `esp32_quick_benchmark`, `esp32_detect_memory_leaks` |
 | `/esp32-port-manager` | "which port is my ESP32", "set default port", "list serial ports" | `esp32_list_ports`, `esp32_detect_ports`, `esp32_set_default_port`, `esp32_add_favorite_port` |
-| `/hardware-interrogation` | "what is this component", "scan the I2C bus", "what does this module support", "capability gaps" | `esp32_hardware_inventory`, `esp32_i2c_scan`, `esp32_component_identify`, `esp32_component_probe`, `esp32_component_capabilities`, `esp32_component_test` |
+| `/hardware-interrogation` | "what is this component", "scan the I2C bus", "what does this module support", "capability gaps", "investigate this unknown chip" | `esp32_hardware_execute`, `esp32_pin_capabilities`, `esp32_hardware_inventory`, `esp32_i2c_scan`, `esp32_component_identify`, `esp32_component_probe`, `esp32_component_capabilities` |
 
 ### Example invocations
 
@@ -779,7 +804,7 @@ conclusion, confidence and a full reproducibility record.
 ```
 esp32-devops-mcp/
 ├── src/
-│   ├── index.ts               # MCP server entry point (33 tools)
+│   ├── index.ts               # MCP server entry point (35 tools)
 │   ├── tools/
 │   │   ├── serial.ts          # Serial port management
 │   │   ├── build.ts           # Build & flash tools
@@ -789,8 +814,10 @@ esp32-devops-mcp/
 │   │   ├── logs.ts            # Log analysis tools (v1.1.0)
 │   │   ├── ota.ts             # OTA & network tools (v1.1.0)
 │   │   ├── hardware.ts        # Inventory, interfaces, bus discovery (v1.2.0)
-│   │   └── component.ts       # Identify, probe, registers, capabilities (v1.2.0)
+│   │   ├── component.ts       # Identify, probe, registers, capabilities (v1.2.0)
+│   │   └── execute.ts         # General-purpose execution, pin capabilities (v1.3.0)
 │   ├── hardware/              # Component-agnostic interrogation engine (v1.2.0)
+│   │   ├── operations.ts      # Arbitrary operations, silicon-validated (v1.3.0)
 │   │   ├── session.ts         # Port resolution, agent detection, pin safety
 │   │   ├── transport.ts       # Injectable HardwareTransport
 │   │   ├── probe.ts           # Declarative probe execution
@@ -826,10 +853,11 @@ esp32-devops-mcp/
 npm test    # compiles src + tests, runs node:test — no physical hardware required
 ```
 
-200 tests across 31 suites cover bus discovery, identification, register decoding,
-capability classification, confidence handling, the experiment lifecycle, and the
-failure paths (malformed responses, timeouts, absent agent, no device, unstable
-device, ambiguous identification).
+269 tests across 43 suites cover bus discovery, identification, register decoding,
+capability classification, confidence handling, the experiment lifecycle, generic
+arbitrary operations on every interface, investigation with no component profile,
+physical pin validation, and the failure paths (malformed responses, timeouts,
+absent agent, no device, unstable device, ambiguous identification).
 
 ## Security
 
@@ -840,17 +868,27 @@ device, ambiguous identification).
 
 ### Hardware interrogation safety
 
-The interrogation subsystem is read-first by construction:
+The constraints that remain are the ones that are **physically real**:
 
-- **No register write path exists** — not behind a flag, not behind any interrogation depth
-- Reserved SPI-flash pins (GPIO6–11 on the classic ESP32) are refused outright
-- Input-only pins are refused for output signals; duplicate pin assignments are rejected
-- SPI chip-select and UART RX must be named explicitly — no pin is driven by default
-- SPI probing is restricted to named, read-oriented profiles; arbitrary command sequences are not supported
-- UART is passive by default; active mode requires a component profile declaring what may be sent
-- Clear-on-read and write-only registers are skipped, with the reason reported
-- A profile probe that emits bytes must supply a written justification, enforced at registration
-- Not implemented by design: credential extraction, firmware readout, EEPROM writes, uncontrolled GPIO manipulation, destructive protocol fuzzing
+- Reserved SPI-flash pins (GPIO6–11 on the classic ESP32) refused — driving them corrupts execution
+- Pins outside the family's range refused — they do not exist
+- Input-only pins refused for output roles — no output driver in the silicon
+- PWM frequency × resolution bounded by the 80 MHz LEDC source clock
+- Bus clocks, payload sizes and sample counts bounded by the peripheral and the agent's buffers
+- SPI chip-select and UART RX/TX must be named explicitly — no pin is ever chosen implicitly
+- UART0 refused — it carries the agent link
+- Conflicting pin roles and malformed arguments refused
+
+Reported rather than refused: strapping pins (usable, but their reset level selects
+boot mode), and a pin driven in one operation and sampled in another.
+
+Not implemented, by design: credential extraction, firmware readout, flash/NVS access,
+mass targeting. Note what is **not** on that list — register writes, arbitrary bus
+transactions, GPIO driving and stimulus generation are all supported, because they are
+how a component is actually investigated.
+
+**Voltage levels are never assumed.** Level shifting and supply compatibility remain
+the operator's responsibility; the MCP cannot detect a mismatch.
 
 ## Troubleshooting
 
@@ -887,6 +925,9 @@ Install Python 3.x and ensure it's in your PATH.
 - [x] Component profile system with ten built-in profiles (v1.2.0)
 - [x] Capability matrix and gap analysis (v1.2.0)
 - [x] Experiment orchestration with reproducible reports (v1.2.0)
+- [x] General-purpose arbitrary hardware operations (v1.3.0)
+- [x] GPIO stimulus, PWM generation, timing measurement and multi-signal capture (v1.3.0)
+- [x] Per-pin capability reporting and silicon-level operation validation (v1.3.0)
 - [ ] Multi-device parallel testing
 - [ ] CI/CD pipeline integration
 - [ ] Custom test scenario definitions

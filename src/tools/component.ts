@@ -12,6 +12,7 @@
  */
 
 import {
+  validateByteArray,
   validateComponentIdentifier,
   validateGpioPin,
   validateI2CAddress,
@@ -38,12 +39,14 @@ import { buildReproducibility, runExperiment } from '../hardware/experiment.js';
 import { identifyComponent, noIdentification } from '../hardware/identify.js';
 import {
   findBytePattern,
+  hexValue,
   matchBytePattern,
   mean,
   median,
   stdDev,
   toHex,
 } from '../hardware/patterns.js';
+import { executeOperationSequence } from '../hardware/operations.js';
 import {
   executeProbe,
   executeProbes,
@@ -72,6 +75,8 @@ import { analyseConsistency } from '../hardware/experiment.js';
 import type {
   AnomalyRecord,
   BenchmarkMeasurement,
+  OperationOutcome,
+  RawOperation,
   CapabilityRecord,
   ComponentBenchmarkReport,
   ComponentProbeReport,
@@ -393,19 +398,33 @@ export interface ComponentProbeOptions extends BusOptions {
   probeProfile?: string;
   depth?: string;
   markings?: string[];
+  /**
+   * Probe ids to run regardless of the depth preset. A depth is a default
+   * breadth of investigation, not a limit — this is how you exceed it.
+   */
+  additionalProbes?: string[];
+  /**
+   * Arbitrary operations to run alongside the profile probes. Needs no profile
+   * entry: this is the path for investigating behaviour nobody anticipated.
+   */
+  additionalOperations?: RawOperation[];
+  /** Force register inspection on, regardless of depth. */
+  inspectRegisters?: boolean;
 }
 
 /**
- * The core generic component interrogation tool.
+ * The core component interrogation tool.
  *
- * Depth controls how much is done, never how safe it is:
+ * Depth selects how much is done by default:
  *   BASIC     connectivity, identification, interface
  *   STANDARD  + configuration, known registers, modes, capabilities
- *   DEEP      + all safe documented registers, feature discovery, timing
+ *   DEEP      + all documented registers, feature discovery, timing
  *   FORENSIC  + repeated measurements, consistency, anomalies, gap analysis
  *
- * FORENSIC means deeper observation, not destructive action. No depth unlocks a
- * register write.
+ * These are presets, not ceilings. FORENSIC is the most thorough default — not
+ * the maximum possible investigation. `additionalProbes`, `additionalOperations`
+ * and `inspectRegisters` extend any depth, and esp32_hardware_execute can always
+ * go further still. Nothing here prevents another experiment afterwards.
  */
 export async function componentProbe(
   options: ComponentProbeOptions = {}
@@ -483,10 +502,14 @@ export async function componentProbe(
       timing: [],
       warnings: [
         ...warnings,
-        'No component profile could be resolved, so no safe probe set exists to run. ' +
-          'Interrogation stopped after connectivity and identification.',
-        'Register inspection, capability enumeration and functional testing all require a ' +
-          'profile — they are driven entirely by profile data.',
+        'No component profile matched, so there is no pre-declared probe set to run. That is ' +
+          'a starting point, not a limit: the component remains fully investigable.',
+        'Use esp32_hardware_execute to construct arbitrary I2C/SPI/UART transactions, GPIO ' +
+          'stimulus, ADC sampling and timing measurements against it directly.',
+        'Use esp32_register_inspect with explicit numeric `registers` to dump raw register ' +
+          'values without a profile, and `writes` to test how the device responds to a write.',
+        'A profile would accelerate this by naming registers and expected responses. Its ' +
+          'absence means those things are UNKNOWN, not forbidden.',
       ],
       errors: probeErrors,
       raw,
@@ -501,6 +524,21 @@ export async function componentProbe(
   const ctx = buildProbeContext(session, options, profile);
   const applicable = profile.safeProbes.filter((p) => p.interface === iface);
   const probes = await executeProbes(applicable, ctx, depth);
+
+  // Probes named explicitly run regardless of the depth preset — the preset
+  // chooses a default set, it does not restrict what may be run.
+  for (const probeId of options.additionalProbes ?? []) {
+    if (probes.some((p) => p.probeId === probeId && p.executed)) continue;
+    const probe = findProbe(profile, probeId);
+    if (!probe) {
+      warnings.push(`additionalProbes: "${probeId}" is not declared by ${profile.partNumber}.`);
+      continue;
+    }
+    const result = await executeProbe(probe, ctx);
+    const existing = probes.findIndex((p) => p.probeId === probeId);
+    if (existing >= 0) probes[existing] = result;
+    else probes.push(result);
+  }
   raw.push(...probes.filter((p) => p.executed).map((p) => p.raw));
 
   for (const probe of probes) {
@@ -511,9 +549,42 @@ export async function componentProbe(
 
   // --- Register inspection (DEEP and above) -------------------------------
   let registers: RegisterInspectionReport | null = null;
-  if (depthRank(depth) >= depthRank('DEEP')) {
+  if (options.inspectRegisters === true || depthRank(depth) >= depthRank('DEEP')) {
     registers = await inspectRegistersInternal(session, profile, options, iface, probes);
     raw.push(...registers.raw);
+  }
+
+  // --- Caller-constructed operations --------------------------------------
+  const additionalOutcomes: OperationOutcome[] = [];
+  if ((options.additionalOperations ?? []).length > 0) {
+    const sequence = await executeOperationSequence(options.additionalOperations!, {
+      transport: session.transport,
+      family: session.family,
+      defaults: {
+        i2c: {
+          ...(options.controller !== undefined ? { controller: options.controller } : {}),
+          ...(options.sda !== undefined ? { sda: options.sda } : {}),
+          ...(options.scl !== undefined ? { scl: options.scl } : {}),
+          ...(options.frequencyHz !== undefined ? { frequencyHz: options.frequencyHz } : {}),
+        },
+        spi: {
+          ...(options.mosi !== undefined ? { mosi: options.mosi } : {}),
+          ...(options.miso !== undefined ? { miso: options.miso } : {}),
+          ...(options.sclk !== undefined ? { sclk: options.sclk } : {}),
+          ...(options.cs !== undefined ? { cs: options.cs } : {}),
+        },
+        uart: {
+          ...(options.rx !== undefined ? { rx: options.rx } : {}),
+          ...(options.tx !== undefined ? { tx: options.tx } : {}),
+          ...(options.baud !== undefined ? { baud: options.baud } : {}),
+        },
+      },
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    additionalOutcomes.push(...sequence.operations);
+    raw.push(...sequence.operations.map((o) => o.raw));
+    warnings.push(...sequence.warnings);
+    probeErrors.push(...sequence.errors);
   }
 
   // --- Timing -------------------------------------------------------------
@@ -617,6 +688,7 @@ export async function componentProbe(
     anomalies,
     modes: depthRank(depth) >= depthRank('STANDARD') ? profile.modes : [],
     protocols: depthRank(depth) >= depthRank('STANDARD') ? profile.protocols : [],
+    additionalOperations: additionalOutcomes,
     timing,
     warnings: [
       ...warnings,
@@ -817,16 +889,42 @@ function failedProbeReport(
 // ===========================================================================
 
 export interface RegisterInspectOptions extends BusOptions {
-  component: string;
+  /** Component profile to decode against. Optional — omit for a raw register dump. */
+  component?: string;
   registers?: (string | number)[];
+  /**
+   * Register writes to perform, each as an explicit experiment.
+   *
+   * A write is a legitimate investigative act: entering a mode, selecting a
+   * bank, triggering a measurement, clearing status, or testing undocumented
+   * behaviour all require one. Each write is recorded verbatim with the state
+   * observed before and after; nothing is inferred about what it means.
+   */
+  writes?: RegisterWriteRequest[];
+  /** Read these registers back after the writes, to observe the effect. */
+  readBackAfterWrite?: boolean;
+}
+
+/** An explicit, caller-constructed register write. */
+export interface RegisterWriteRequest {
+  /** Register address, or the first byte of the payload for command devices. */
+  register: number;
+  /** Value bytes following the register address. */
+  value: number[];
+  /** Why this write is being made — recorded in the report, never validated. */
+  justification?: string;
 }
 
 /**
- * Controlled, READ-ONLY register inspection.
+ * Register inspection and controlled register writing.
  *
- * There is no write path in this tool — not behind a flag, not behind a depth.
- * Registers declared unsafe to read, write-only, or clear-on-read are skipped
- * with the reason stated rather than read anyway.
+ * Reads are the default and need no component profile: without one, the caller
+ * names the registers and gets raw values back; with one, the same values are
+ * decoded into named bitfields. A profile is a decoder, not a permission.
+ *
+ * Writes happen only when the caller explicitly supplies `writes`. Each is
+ * executed as requested and recorded with before/after state. The tool does not
+ * decide whether a write is meaningful — that is the experiment.
  */
 export async function registerInspect(
   options: RegisterInspectOptions
@@ -834,36 +932,41 @@ export async function registerInspect(
   const iface = coerceInterface(options.interface, 'I2C');
   const errors = validateBusOptions(options, iface);
 
-  if (!options.component || !validateComponentIdentifier(options.component)) {
-    errors.push('A valid `component` is required — register maps come from component profiles.');
+  if (options.component !== undefined && !validateComponentIdentifier(options.component)) {
+    errors.push(`Invalid component identifier: ${options.component}`);
+  }
+  for (const [index, write] of (options.writes ?? []).entries()) {
+    if (!Number.isInteger(write.register) || write.register < 0 || write.register > 0xff) {
+      errors.push(`writes[${index}].register must be an integer 0-255.`);
+    }
+    if (!validateByteArray(write.value, 512)) {
+      errors.push(`writes[${index}].value must be an array of 1-512 integers in 0-255.`);
+    }
   }
   if (errors.length > 0) return failedRegisterReport(options, iface, errors);
 
-  const profile = findProfile(options.component);
-  if (!profile) {
-    return failedRegisterReport(options, iface, [
-      `No registered component profile matches "${options.component}". ` +
-        `Known profiles: ${listProfiles().map((p) => p.id).join(', ')}`,
-    ]);
+  const profile = options.component ? findProfile(options.component) : null;
+  const profileWarnings: string[] = [];
+
+  if (options.component && !profile) {
+    // Not knowing the part is a reason to investigate, not a reason to stop.
+    profileWarnings.push(
+      `No registered profile matches "${options.component}", so values are reported raw rather ` +
+        'than decoded into named bitfields. Known profiles: ' +
+        listProfiles().map((p) => p.id).join(', ')
+    );
   }
 
-  if (profile.registers.length === 0) {
-    return {
-      success: true,
-      componentId: profile.id,
-      partNumber: profile.partNumber,
-      interface: iface,
-      address: options.address ?? null,
-      readOnly: true,
-      registers: [],
-      skipped: [],
-      warnings: [
-        `${profile.partNumber} declares no register map. It is a command-protocol device, or ` +
-          'its registers are not reachable by an addressed bus read.',
-        'Use esp32_component_probe with the profile safe probes instead.',
-      ],
-      raw: [],
-    };
+  const explicitRegisters = (options.registers ?? []).filter(
+    (r): r is number => typeof r === 'number'
+  );
+  const hasProfileRegisters = (profile?.registers.length ?? 0) > 0;
+
+  if (!hasProfileRegisters && explicitRegisters.length === 0 && (options.writes ?? []).length === 0) {
+    return failedRegisterReport(options, iface, [
+      'Nothing to do: supply numeric `registers` to read, `writes` to perform, or a ' +
+        '`component` whose profile declares a register map.',
+    ]);
   }
 
   const session = await openSession({ ...(options.port !== undefined ? { port: options.port } : {}) });
@@ -874,9 +977,242 @@ export async function registerInspect(
     return failedRegisterReport(options, iface, agentUnavailableHelp(session.agentDetail));
   }
 
-  const report = await inspectRegistersInternal(session, profile, options, iface, [], options.registers);
-  report.warnings.unshift(...pinCheck.warnings);
+  const report = hasProfileRegisters
+    ? await inspectRegistersInternal(session, profile!, options, iface, [], options.registers)
+    : await inspectRawRegisters(session, options, iface, explicitRegisters);
+
+  // Undecoded registers the caller named that the profile does not describe are
+  // still read — an undocumented register is exactly what experimentation is for.
+  if (hasProfileRegisters && explicitRegisters.length > 0) {
+    const known = new Set(
+      profile!.registers.filter((r) => typeof r.address === 'number').map((r) => r.address as number)
+    );
+    const undocumented = explicitRegisters.filter((r) => !known.has(r));
+    if (undocumented.length > 0) {
+      const extra = await inspectRawRegisters(session, options, iface, undocumented);
+      report.registers.push(...extra.registers);
+      report.raw.push(...extra.raw);
+      report.warnings.push(
+        `${undocumented.length} requested register(s) are absent from the ${profile!.partNumber} ` +
+          'profile and were read raw, without field decoding.'
+      );
+    }
+  }
+
+  if ((options.writes ?? []).length > 0) {
+    const writeReport = await performRegisterWrites(session, options, iface, profile);
+    report.writes = writeReport.writes;
+    // The flag reports what actually happened, so it must reflect the writes.
+    report.readOnly = false;
+    report.raw.push(...writeReport.raw);
+    report.warnings.push(...writeReport.warnings);
+    if (options.readBackAfterWrite !== false) {
+      const readBack = await inspectRawRegisters(
+        session,
+        options,
+        iface,
+        options.writes!.map((w) => w.register)
+      );
+      report.registersAfterWrite = readBack.registers;
+      report.raw.push(...readBack.raw);
+    }
+  }
+
+  report.warnings.unshift(...pinCheck.warnings, ...profileWarnings);
   return report;
+}
+
+/**
+ * Read registers with no profile: raw values, no field decoding.
+ *
+ * This is the path that makes an unknown component investigable. It reports what
+ * each address returned and nothing more, because nothing more is known.
+ */
+async function inspectRawRegisters(
+  session: InterrogationSession,
+  options: BusOptions,
+  iface: HardwareInterfaceKind,
+  registers: number[]
+): Promise<RegisterInspectionReport> {
+  const raw: RawInterpretation[] = [];
+  const results: RegisterInspectionResult[] = [];
+  const warnings: string[] = [];
+  const ctx = buildProbeContext(session, options, null);
+  const address = ctx.address;
+
+  if (iface !== 'I2C') {
+    warnings.push(
+      `Raw register reads are implemented for I2C. For ${iface}, use esp32_hardware_execute ` +
+        'with an explicit transaction.'
+    );
+  }
+
+  if (address === undefined) {
+    warnings.push('No I2C address supplied, so no raw register read could be addressed.');
+  }
+
+  if (iface === 'I2C' && address !== undefined) {
+    for (const register of registers) {
+      const response = await session.transport.request<{ bytes?: number[] }>(
+        'i2c.writeRead',
+        {
+          ...(options.controller !== undefined ? { controller: options.controller } : {}),
+          ...(options.sda !== undefined ? { sda: options.sda } : {}),
+          ...(options.scl !== undefined ? { scl: options.scl } : {}),
+          ...(options.frequencyHz !== undefined ? { frequencyHz: options.frequencyHz } : {}),
+          address,
+          write: [register],
+          readLength: 1,
+        },
+        { ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) }
+      );
+
+      const bytes =
+        response.ok && Array.isArray(response.data?.bytes)
+          ? response.data!.bytes!.map((b) => b & 0xff)
+          : [];
+
+      raw.push(
+        rawInterpretation(
+          response.raw,
+          response.data,
+          `Raw read of register ${hexValue(register)}`,
+          response.ok ? 'REGISTER_READ' : 'NONE',
+          response.ok ? 'HIGH' : 'UNKNOWN'
+        )
+      );
+
+      const definition = {
+        address: register,
+        name: `REG_${hexValue(register)}`,
+        description: 'Undocumented register — read raw, with no field decoding.',
+        width: 8,
+        access: 'R' as const,
+        fields: [],
+        safeToRead: true,
+      };
+
+      results.push(
+        bytes.length > 0
+          ? decodeRegister(definition, bytes.slice(0, 1), response.raw)
+          : failedRegisterResult(
+              definition,
+              response.error ?? 'No data returned',
+              response.raw
+            )
+      );
+    }
+  }
+
+  return {
+    success: results.some((r) => r.read),
+    componentId: 'unidentified',
+    partNumber: 'UNKNOWN',
+    interface: iface,
+    address: address ?? null,
+    readOnly: true,
+    registers: results,
+    skipped: [],
+    warnings,
+    raw,
+  };
+}
+
+/**
+ * Perform explicit register writes.
+ *
+ * Each write is executed exactly as given. The report records the bytes sent,
+ * the bus acknowledgement, and the caller's stated justification — it makes no
+ * claim about what the write accomplished, because that is not knowable from the
+ * write alone.
+ */
+async function performRegisterWrites(
+  session: InterrogationSession,
+  options: RegisterInspectOptions,
+  iface: HardwareInterfaceKind,
+  profile: ComponentProfile | null
+): Promise<{
+  writes: NonNullable<RegisterInspectionReport['writes']>;
+  raw: RawInterpretation[];
+  warnings: string[];
+}> {
+  const raw: RawInterpretation[] = [];
+  const warnings: string[] = [];
+  const writes: NonNullable<RegisterInspectionReport['writes']> = [];
+  const ctx = buildProbeContext(session, options, profile);
+  const address = ctx.address;
+
+  if (iface !== 'I2C') {
+    warnings.push(
+      `Register writes are implemented for I2C. For ${iface}, use esp32_hardware_execute with ` +
+        'an explicit SPI or UART transaction.'
+    );
+    return { writes, raw, warnings };
+  }
+  if (address === undefined) {
+    warnings.push('No I2C address supplied, so no register write could be addressed.');
+    return { writes, raw, warnings };
+  }
+
+  for (const request of options.writes ?? []) {
+    // Capture the prior value so the effect of the write is observable.
+    const before = await session.transport.request<{ bytes?: number[] }>(
+      'i2c.writeRead',
+      { ...i2cBusParams(options), address, write: [request.register], readLength: 1 },
+      { ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) }
+    );
+    const beforeBytes =
+      before.ok && Array.isArray(before.data?.bytes) ? before.data!.bytes!.map((b) => b & 0xff) : [];
+
+    const payload = [request.register, ...request.value];
+    const response = await session.transport.request<{
+      writeAck?: boolean;
+      writeStatus?: number;
+      statusText?: string;
+    }>(
+      'i2c.write',
+      { ...i2cBusParams(options), address, write: payload },
+      { ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) }
+    );
+
+    raw.push(
+      rawInterpretation(
+        response.raw,
+        response.data,
+        `Wrote ${toHex(payload)} to ${hexValue(request.register)} at ` +
+          `${hexValue(address)} — acknowledgement: ${response.data?.statusText ?? 'unknown'}`,
+        response.ok ? 'DEVICE_RESPONSE' : 'NONE',
+        response.ok ? 'HIGH' : 'UNKNOWN'
+      )
+    );
+
+    writes.push({
+      register: request.register,
+      registerHex: hexValue(request.register),
+      value: request.value,
+      valueHex: toHex(request.value),
+      ...(request.justification !== undefined ? { justification: request.justification } : {}),
+      acknowledged: response.data?.writeAck === true,
+      busStatus: response.data?.statusText ?? response.error ?? 'unknown',
+      valueBeforeHex: beforeBytes.length > 0 ? toHex(beforeBytes) : null,
+      executed: response.ok,
+      ...(response.error !== undefined ? { error: response.error } : {}),
+      note:
+        'A bus acknowledgement confirms the device accepted the bytes. It does not establish ' +
+        'that the device did what the caller intended — read the state back and compare.',
+    });
+  }
+
+  return { writes, raw, warnings };
+}
+
+function i2cBusParams(options: BusOptions): Record<string, unknown> {
+  return {
+    ...(options.controller !== undefined ? { controller: options.controller } : {}),
+    ...(options.sda !== undefined ? { sda: options.sda } : {}),
+    ...(options.scl !== undefined ? { scl: options.scl } : {}),
+    ...(options.frequencyHz !== undefined ? { frequencyHz: options.frequencyHz } : {}),
+  };
 }
 
 /**
@@ -1165,7 +1501,12 @@ export async function componentCapabilities(
   const iface = coerceInterface(options.interface, 'I2C');
 
   if (!options.component || !validateComponentIdentifier(options.component)) {
-    return capabilitiesError(options.component ?? 'unknown', 'A valid `component` is required.');
+    return capabilitiesError(
+      options.component ?? 'unknown',
+      'A `component` is required: the capability matrix is built from a profile\'s documented ' +
+        'capability list. Without a profile there is no documentation tier to compare against — ' +
+        'investigate directly with esp32_hardware_execute and record what you observe.'
+    );
   }
 
   const profile = findProfile(options.component);
@@ -1315,14 +1656,21 @@ export async function componentTest(
 
   const errors = validateBusOptions(options, iface);
   if (!options.component || !validateComponentIdentifier(options.component)) {
-    errors.push('A valid `component` is required — tests are declared by component profiles.');
+    errors.push(
+      'A `component` is required: functional tests are declared by component profiles. ' +
+        'To exercise a component that has no profile, use esp32_hardware_execute to construct ' +
+        'the transactions directly, or esp32_hardware_experiment with inline operations — ' +
+        'both work without any profile.'
+    );
   }
   if (errors.length > 0) return failedTestReport(options.component ?? 'unknown', depth, errors);
 
-  const profile = findProfile(options.component);
+  const profile = findProfile(options.component!);
   if (!profile) {
-    return failedTestReport(options.component, depth, [
-      `No registered component profile matches "${options.component}".`,
+    return failedTestReport(options.component!, depth, [
+      `No registered component profile matches "${options.component}". Profiles supply the ` +
+        'declared tests for this tool; interrogation without one is done through ' +
+        'esp32_hardware_execute or esp32_hardware_experiment.',
     ]);
   }
 
@@ -1583,7 +1931,11 @@ export async function componentBenchmark(
   const errors = validateBusOptions(options, iface);
 
   if (!options.component || !validateComponentIdentifier(options.component)) {
-    errors.push('A valid `component` is required — benchmarks are declared by component profiles.');
+    errors.push(
+      'A `component` is required: benchmarks are declared by component profiles. To time ' +
+        'arbitrary transactions on a component with no profile, use esp32_hardware_execute ' +
+        'with repetitions — it reports per-operation timing.'
+    );
   }
   if (options.iterations !== undefined && !validateIterations(options.iterations, 200)) {
     errors.push('iterations must be between 1 and 200');
@@ -1870,7 +2222,16 @@ export interface HardwareExperimentOptions extends BusOptions {
   targetComponent?: string;
   hypothesis?: string;
   expectedResult?: string;
-  procedure?: { probeId: string; description?: string; critical?: boolean }[];
+  procedure?: {
+    /** Probe id from the target component profile. Optional. */
+    probeId?: string;
+    /** Raw operation constructed inline. Needs no profile. */
+    operation?: RawOperation;
+    description?: string;
+    critical?: boolean;
+    expectPattern?: string;
+    expectMinBytes?: number;
+  }[];
   safetyConstraints?: string[];
   telemetry?: { name: string; description?: string; required?: boolean }[];
   repetitions?: number;
@@ -1899,29 +2260,47 @@ export async function hardwareExperiment(
   }
 
   const profile = options.targetComponent ? findProfile(options.targetComponent) : null;
+  const experimentWarnings: string[] = [];
+
   if (options.targetComponent && !profile) {
-    errors.push(
-      `No registered component profile matches "${options.targetComponent}". ` +
-        'Experiment steps resolve to safe probes declared by a profile.'
+    // Worth saying either way: it tells the caller no documented context is
+    // available. It is not a failure — inline operations are unaffected.
+    experimentWarnings.push(
+      `No registered profile matches "${options.targetComponent}", so no documented context ` +
+        'is available for it. Steps naming a probeId cannot resolve; steps carrying an inline ' +
+        '`operation` run regardless.'
     );
   }
 
-  // Default the procedure to the profile's own probes for the chosen interface.
+  // Default the procedure to the profile's own probes, when there is one.
   const procedure =
     options.procedure && options.procedure.length > 0
       ? options.procedure.map((step) => ({
-          probeId: step.probeId,
+          ...(step.probeId !== undefined ? { probeId: step.probeId } : {}),
+          ...(step.operation !== undefined ? { operation: step.operation } : {}),
           ...(step.description !== undefined ? { description: step.description } : {}),
           critical: step.critical ?? false,
+          ...(step.expectPattern !== undefined ? { expectPattern: step.expectPattern } : {}),
+          ...(step.expectMinBytes !== undefined ? { expectMinBytes: step.expectMinBytes } : {}),
         }))
       : (profile?.safeProbes ?? [])
           .filter((p) => p.interface === iface && shouldRunProbe(p, 'STANDARD'))
-          .map((p) => ({ probeId: p.id, description: p.description, critical: false }));
+          .map((p) => ({
+            probeId: p.id,
+            description: p.description,
+            critical: false,
+          })) as ExperimentDefinition['procedure'];
+
+  for (const [index, step] of procedure.entries()) {
+    if (!step.probeId && !step.operation) {
+      errors.push(`procedure[${index}] must carry either a probeId or an inline operation.`);
+    }
+  }
 
   if (procedure.length === 0) {
     errors.push(
-      'No procedure steps. Supply `procedure`, or name a `targetComponent` whose profile ' +
-        `declares safe probes for the ${iface} interface.`
+      'No procedure steps. Supply `procedure` — each step carries either an inline ' +
+        '`operation` (no profile needed) or a `probeId` from a named `targetComponent`.'
     );
   }
 
@@ -1977,11 +2356,36 @@ export async function hardwareExperiment(
 
   const ctx = buildProbeContext(session, options, profile);
 
-  return runExperiment(definition, {
+  const report = await runExperiment(definition, {
     ...ctx,
     profile,
+    family: session.family,
+    operationDefaults: {
+      i2c: {
+        ...(options.controller !== undefined ? { controller: options.controller } : {}),
+        ...(options.sda !== undefined ? { sda: options.sda } : {}),
+        ...(options.scl !== undefined ? { scl: options.scl } : {}),
+        ...(options.frequencyHz !== undefined ? { frequencyHz: options.frequencyHz } : {}),
+      },
+      spi: {
+        ...(options.mosi !== undefined ? { mosi: options.mosi } : {}),
+        ...(options.miso !== undefined ? { miso: options.miso } : {}),
+        ...(options.sclk !== undefined ? { sclk: options.sclk } : {}),
+        ...(options.cs !== undefined ? { cs: options.cs } : {}),
+        ...(options.mode !== undefined ? { mode: options.mode as 0 | 1 | 2 | 3 } : {}),
+        ...(options.clockHz !== undefined ? { clockHz: options.clockHz } : {}),
+      },
+      uart: {
+        ...(options.rx !== undefined ? { rx: options.rx } : {}),
+        ...(options.tx !== undefined ? { tx: options.tx } : {}),
+        ...(options.baud !== undefined ? { baud: options.baud } : {}),
+      },
+    },
     reproducibility: session.reproducibility,
   });
+
+  report.warnings.push(...experimentWarnings);
+  return report;
 }
 
 function failedExperiment(
