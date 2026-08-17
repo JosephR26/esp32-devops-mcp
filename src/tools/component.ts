@@ -1606,7 +1606,12 @@ export async function componentCapabilities(
   }
 
   return {
-    success: true,
+    // An offline matrix is a legitimate product when it is what was ASKED for, so
+    // `offline: true` succeeds by definition. What must not report success is a LIVE
+    // request that silently degraded to documentation — the caller asked to interrogate
+    // hardware and did not get it. `mode` has always carried that fact; `success` now
+    // agrees with it instead of contradicting it.
+    success: options.offline === true || mode === 'LIVE',
     componentId: profile.id,
     partNumber: profile.partNumber,
     mode,

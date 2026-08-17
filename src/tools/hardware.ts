@@ -807,7 +807,11 @@ export async function interfaceDiscovery(
   }
 
   return {
-    success: true,
+    // False when the agent was never reached. The survey is still returned and still
+    // useful — datasheet controller counts, documented default pins — but it reports
+    // what the family provides rather than what this unit answered, and a caller
+    // keying off `success` must not be told those are the same thing.
+    success: session.agentPresent,
     target: session.port.value ?? 'unresolved-port',
     chip,
     interfaces,
