@@ -4,7 +4,7 @@
  */
 
 import { executePython, getPythonScriptPath } from '../utils/exec.js';
-import { parseSerialPorts } from '../utils/parser.js';
+import { parseSerialPorts, identifyUsbSerialBridge } from '../utils/parser.js';
 import { validateSerialPort } from '../utils/validation.js';
 import type { SerialPort } from '../types/index.js';
 
@@ -90,10 +90,15 @@ export async function detectESP32Ports(): Promise<{
     for (const line of lines) {
       const match = line.match(/(COM\d+|\/dev\/tty\w+):\s+(.+)/);
       if (match) {
+        // Report what the description actually supports. Claiming every enumerated
+        // port is an ESP32 is worse than not guessing: it invites flashing a
+        // host-internal serial device that merely has "UART" in its name.
+        const bridge = identifyUsbSerialBridge(match[2]);
         ports.push({
           port: match[1],
           description: match[2],
-          isESP32: true
+          isESP32: bridge !== null,
+          ...(bridge ? { bridge } : {})
         });
       }
     }

@@ -162,6 +162,48 @@ export function parseTestOutput(output: string): FirmwareTestResult {
 /**
  * Parse serial port list output from serial-port-manager.py
  */
+/**
+ * USB-serial bridge chips used on ESP32 boards, plus the ESP32's own native USB.
+ *
+ * Matching is deliberately positive-only: a port qualifies because its description
+ * names a known bridge, never merely because it contains the word "UART". Host
+ * platforms enumerate internal buses with names like "Qualcomm(R) UART Bus Device",
+ * and treating those as ESP32s invites flashing the wrong port.
+ */
+const USB_SERIAL_BRIDGES: ReadonlyArray<{ pattern: RegExp; name: string }> = [
+  { pattern: /cp210\d/i, name: 'Silicon Labs CP210x' },
+  { pattern: /\bch(?:340|341|9102)\b/i, name: 'WCH CH34x' },
+  { pattern: /ft(?:232|231|2232|di)/i, name: 'FTDI FT23x' },
+  { pattern: /silicon\s*labs/i, name: 'Silicon Labs CP210x' },
+  { pattern: /usb\s*jtag\/?\s*serial/i, name: 'ESP32 native USB (JTAG/serial)' },
+  { pattern: /\besp32\b/i, name: 'ESP32 native USB' },
+  { pattern: /usb[-\s]?serial/i, name: 'Generic USB-serial' }
+];
+
+/**
+ * Identify the USB-serial bridge named in a port description.
+ * Returns the bridge family, or null when the description names none — which is
+ * the honest answer for a host-internal or virtual serial port.
+ */
+export function identifyUsbSerialBridge(description: string): string | null {
+  if (!description) return null;
+  for (const { pattern, name } of USB_SERIAL_BRIDGES) {
+    if (pattern.test(description)) return name;
+  }
+  return null;
+}
+
+/**
+ * Whether a port plausibly carries an ESP32.
+ *
+ * This is a HEURISTIC over the host's port description, not a verified fact: a
+ * CH340 might have any board behind it. Confirm the target with an actual chip
+ * query before acting on it.
+ */
+export function looksLikeEsp32Port(description: string): boolean {
+  return identifyUsbSerialBridge(description) !== null;
+}
+
 export function parseSerialPorts(output: string): any {
   try {
     // Try to parse as JSON first
@@ -175,12 +217,12 @@ export function parseSerialPorts(output: string): any {
     const portMatches = output.matchAll(/(\d+)\.\s+(COM\d+)\s+-\s+(.+)/g);
 
     for (const match of portMatches) {
+      const bridge = identifyUsbSerialBridge(match[3]);
       ports.push({
         port: match[2],
         description: match[3],
-        isESP32: match[3].toLowerCase().includes('cp210') ||
-                 match[3].toLowerCase().includes('ch340') ||
-                 match[3].toLowerCase().includes('uart')
+        isESP32: bridge !== null,
+        ...(bridge ? { bridge } : {})
       });
     }
 
