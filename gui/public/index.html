@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Control Panel</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="dot" id="link-dot" aria-hidden="true"></span>
+    <h1>ESP32 Control Panel</h1>
+  </div>
+  <div class="bar-right">
+    <label class="field">
+      <span>Port</span>
+      <!-- A free-text input, not a select: auto-detection needs FirmwareToolkit, and
+           the panel must stay usable when that is not configured. -->
+      <input id="port" list="port-options" placeholder="COM3" autocomplete="off" size="22">
+      <datalist id="port-options"></datalist>
+    </label>
+    <button id="refresh-ports" class="ghost">Detect</button>
+    <span id="drive-badge" class="badge" title="Whether this server will allow operations that drive a pin"></span>
+  </div>
+</header>
+
+<main>
+  <!-- ── Observation ─────────────────────────────────────────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Observe</h2>
+      <p class="sub">Read-only. Nothing is configured and no pin is driven.</p>
+    </div>
+    <div class="actions">
+      <button data-action="device.inventory" data-target="out-inventory">Inventory</button>
+      <button data-action="device.interfaces" data-target="out-interfaces">Interfaces</button>
+      <button data-action="device.pins" data-target="out-pins">Pin map</button>
+      <button data-action="ports.detect" data-target="out-ports">Detect ports</button>
+    </div>
+
+    <div class="summary" id="device-summary" hidden></div>
+    <details class="raw"><summary>Inventory JSON</summary><pre id="out-inventory"></pre></details>
+    <details class="raw"><summary>Interfaces JSON</summary><pre id="out-interfaces"></pre></details>
+    <details class="raw"><summary>Pin map JSON</summary><pre id="out-pins"></pre></details>
+    <details class="raw"><summary>Ports JSON</summary><pre id="out-ports"></pre></details>
+  </section>
+
+  <!-- ── I2C ─────────────────────────────────────────────────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>I²C</h2>
+      <p class="sub">Scans the address range. An address is not an identification.</p>
+    </div>
+    <div class="row">
+      <label class="field"><span>SDA</span><input id="i2c-sda" type="number" value="21" min="0" max="48"></label>
+      <label class="field"><span>SCL</span><input id="i2c-scl" type="number" value="22" min="0" max="48"></label>
+      <label class="field"><span>Freq (Hz)</span><input id="i2c-freq" type="number" value="100000" step="10000"></label>
+      <label class="field"><span>Repeats</span><input id="i2c-repeats" type="number" value="3" min="1" max="8"></label>
+      <button id="i2c-scan">Scan bus</button>
+    </div>
+    <div id="i2c-result" class="result"></div>
+    <details class="raw"><summary>Scan JSON</summary><pre id="out-i2c"></pre></details>
+  </section>
+
+  <!-- ── UART ────────────────────────────────────────────────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>UART monitor</h2>
+      <p class="sub">Passive capture only — the server will not transmit. Each capture is capped at 512 bytes by the agent, so the live view is a series of short reads.</p>
+    </div>
+    <div class="row">
+      <label class="field"><span>RX GPIO</span><input id="uart-rx" type="number" value="16" min="0" max="48"></label>
+      <label class="field"><span>Baud</span>
+        <select id="uart-baud">
+          <option>4800</option><option selected>9600</option><option>19200</option>
+          <option>38400</option><option>57600</option><option>115200</option>
+        </select>
+      </label>
+      <button id="uart-once">Capture once</button>
+      <button id="uart-stream" class="primary">Start live</button>
+      <button id="uart-identify" class="ghost">Identify device</button>
+    </div>
+    <div id="uart-meta" class="result"></div>
+    <pre id="uart-log" class="log" aria-live="polite"></pre>
+    <details class="raw"><summary>Identification JSON</summary><pre id="out-identify"></pre></details>
+  </section>
+
+  <!-- ── Drive ───────────────────────────────────────────────────── -->
+  <section class="panel danger" id="drive-panel">
+    <div class="panel-head">
+      <h2>Drive pins</h2>
+      <p class="sub">
+        These change the physical state of a pin. GPIO6–11 are wired to SPI flash and are
+        refused outright; GPIO34–39 are input-only. The refusal is enforced by the tools,
+        not by this page.
+      </p>
+    </div>
+    <div id="drive-locked" class="locked">
+      Server started without <code>--allow-drive</code>, so these are refused.
+      Restart with the flag if you intend to drive pins.
+    </div>
+    <div class="row" id="drive-controls" hidden>
+      <label class="field"><span>Pin</span><input id="drive-pin" type="number" value="2" min="0" max="48"></label>
+      <label class="field"><span>Level</span>
+        <select id="drive-level"><option value="1">HIGH</option><option value="0">LOW</option></select>
+      </label>
+      <button id="drive-write" class="danger-btn">Set level</button>
+      <button id="drive-read" class="ghost">Read pin</button>
+    </div>
+    <div id="drive-result" class="result"></div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span id="status">ready</span>
+  <span class="spacer"></span>
+  <span class="muted">loopback only · shares the MCP server's hardware modules</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
