@@ -6,9 +6,52 @@ const statusEl = $('status');
 let meta = { allowDrive: false, actions: {} };
 let stream = null;
 
+// ── DOM construction ───────────────────────────────────
+//
+// Everything rendered here is built with textContent and createElement, never
+// innerHTML. This page displays data from DEVICES WE DO NOT TRUST — that is the
+// whole purpose of the tool — and it can also drive pins when the server is started
+// with --allow-drive. Script injected via a crafted USB product string or a device's
+// output would therefore be able to call /api/hardware.execute. Untrusted input is
+// the normal case here, not an edge case.
+
+/** Build an element. `text` is set via textContent, so markup in it is inert. */
+function el(tag, options = {}, children = []) {
+  const node = document.createElement(tag);
+  if (options.class) node.className = options.class;
+  if (options.text !== undefined) node.textContent = String(options.text);
+  if (options.title) node.title = String(options.title);
+  for (const child of children) {
+    node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+/** Replace an element's contents with the supplied nodes. */
+function render(target, ...nodes) {
+  const node = typeof target === 'string' ? $(target) : target;
+  node.replaceChildren(...nodes.filter(Boolean));
+  return node;
+}
+
 function setStatus(text, kind) {
   statusEl.textContent = text;
   statusEl.className = kind ?? '';
+}
+
+/**
+ * Read a numeric field, refusing anything that is not a finite number.
+ *
+ * `Number('')` is NaN, and sending NaN to a hardware operation produces a confusing
+ * failure at the far end of a serial link rather than an obvious one here.
+ */
+function num(id, label) {
+  const raw = $(id).value.trim();
+  const value = Number(raw);
+  if (raw === '' || !Number.isFinite(value)) {
+    throw new Error(`${label} needs a number (got ${raw === '' ? 'an empty field' : `"${raw}"`})`);
+  }
+  return value;
 }
 
 async function call(action, params = {}) {
@@ -18,11 +61,20 @@ async function call(action, params = {}) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ port: $('port').value || undefined, ...params }),
   });
-  const body = await res.json();
+
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    setStatus(`${action}: server returned a non-JSON response`, 'err');
+    throw new Error('server returned a non-JSON response');
+  }
+
   if (!res.ok || body.ok === false) {
     setStatus(body.error ?? `${action} failed`, 'err');
     throw new Error(body.error ?? 'request failed');
   }
+
   // Distinguish a slow call from one that queued behind another port user.
   const queued = body.queuedMs > 50 ? ` (waited ${body.queuedMs} ms for the port)` : '';
   setStatus(`${action} · ${body.elapsedMs} ms${queued}`, 'ok');
@@ -33,13 +85,17 @@ const show = (id, data) => { $(id).textContent = JSON.stringify(data, null, 2); 
 
 /** Confidence-carrying fields render with their source, because that is the point. */
 function tile(label, field) {
-  if (!field) return '';
+  if (!field) return null;
   const v = field?.value ?? field;
-  if (v === null || v === undefined) return '';
-  const src = field?.source && field.source !== 'NONE' ? field.source.replace(/_/g, ' ').toLowerCase() : '';
-  return `<div class="tile"><div class="k">${label}</div><div class="v">${
-    Array.isArray(v) ? v.join(', ') : v
-  }</div>${src ? `<div class="src">${src}</div>` : ''}</div>`;
+  if (v === null || v === undefined) return null;
+  const src = field?.source && field.source !== 'NONE'
+    ? field.source.replace(/_/g, ' ').toLowerCase()
+    : '';
+  return el('div', { class: 'tile' }, [
+    el('div', { class: 'k', text: label }),
+    el('div', { class: 'v', text: Array.isArray(v) ? v.join(', ') : v }),
+    src ? el('div', { class: 'src', text: src }) : null,
+  ].filter(Boolean));
 }
 
 // ── ports ──────────────────────────────────────────────
@@ -59,9 +115,13 @@ async function loadPorts() {
 
     // isESP32 is a heuristic over the host description, so name the bridge that
     // matched rather than presenting a bare yes.
-    $('port-options').innerHTML = ports
-      .map((p) => `<option value="${p.port}">${p.isESP32 ? (p.bridge ?? 'USB serial') : 'no USB-serial bridge'}</option>`)
-      .join('');
+    render('port-options', ...ports.map((p) => {
+      const option = el('option', {
+        text: p.isESP32 ? (p.bridge ?? 'USB serial') : 'no USB-serial bridge',
+      });
+      option.value = p.port;
+      return option;
+    }));
 
     const firstEsp = ports.find((p) => p.isESP32);
     if (!$('port').value && firstEsp) $('port').value = firstEsp.port;
@@ -75,40 +135,52 @@ async function loadPorts() {
 async function runInventory() {
   const inv = await call('device.inventory');
   show('out-inventory', inv);
+
   const c = inv.chip ?? {};
   const f = inv.firmware ?? {};
-  const html = [
+  const tiles = [
     tile('Chip', c.model), tile('Revision', c.revision), tile('Cores', c.cores),
     tile('CPU MHz', c.cpuFrequencyMHz), tile('MAC', c.macAddress),
     tile('Flash bytes', c.flashSizeBytes), tile('Agent', f.agentVersion),
     tile('Framework', f.framework), tile('Reset reason', c.resetReason),
-  ].filter(Boolean).join('');
-  const box = $('device-summary');
-  box.innerHTML = html;
-  box.hidden = !html;
+  ].filter(Boolean);
+
+  const box = render('device-summary', ...tiles);
+  box.hidden = tiles.length === 0;
+
+  // `success: false` means the agent was never reached — the report holds datasheet
+  // values only. Say so rather than presenting documentation as measurement.
+  if (inv.success === false) {
+    setStatus('inventory returned datasheet values only — the agent was not reached', 'warn');
+  }
 }
 
 // ── i2c ────────────────────────────────────────────────
 async function runI2cScan() {
   const scan = await call('i2c.scan', {
-    sda: Number($('i2c-sda').value),
-    scl: Number($('i2c-scl').value),
-    frequencyHz: Number($('i2c-freq').value),
-    repeats: Number($('i2c-repeats').value),
+    sda: num('i2c-sda', 'SDA'),
+    scl: num('i2c-scl', 'SCL'),
+    frequencyHz: num('i2c-freq', 'Frequency'),
+    repeats: num('i2c-repeats', 'Repeats'),
   });
   show('out-i2c', scan);
 
   const responding = scan.responding ?? [];
-  const grid = (scan.results ?? [])
-    .map((r) => `<span class="addr ${r.state === 'RESPONDS' ? 'hit' : ''}" title="${r.state}">${r.hex}</span>`)
-    .join('');
+  const grid = el('div', { class: 'addr-grid' }, (scan.results ?? []).map((r) =>
+    el('span', {
+      class: `addr ${r.state === 'RESPONDS' ? 'hit' : ''}`,
+      text: r.hex,
+      title: r.state,
+    })
+  ));
 
-  $('i2c-result').innerHTML = responding.length
-    ? `<span class="ok">${responding.length} device(s) responded</span> in ${scan.scanDurationMs} ms
-       <div class="addr-grid">${grid}</div>`
-    : `<span class="warn">Nothing responded.</span> That is not the same as an empty bus —
-       check pull-ups, wiring, power and the SDA/SCL assignment before concluding anything.
-       <div class="addr-grid">${grid}</div>`;
+  render('i2c-result', responding.length
+    ? el('span', { class: 'ok', text: `${responding.length} device(s) responded` })
+    : el('span', { class: 'warn', text: 'Nothing responded.' }),
+    document.createTextNode(responding.length
+      ? ` in ${scan.scanDurationMs} ms`
+      : ' That is not the same as an empty bus — check pull-ups, wiring, power and the SDA/SCL assignment before concluding anything.'),
+    grid);
 }
 
 // ── uart ───────────────────────────────────────────────
@@ -132,19 +204,27 @@ function appendLog(text, { boundary = false } = {}) {
 }
 
 function renderUartMeta(capture) {
-  const candidates = (capture.protocolCandidates ?? [])
-    .map((c) => `${c.partNumber} <span class="muted">(${c.confidence})</span>`)
-    .join(', ');
-  const warn = (capture.warnings ?? []).length
-    ? `<div class="warn">${capture.warnings.join(' ')}</div>` : '';
-  $('uart-meta').innerHTML =
-    `${capture.totalBytes} bytes` +
-    (candidates ? ` · likely: ${candidates}` : '') + warn;
+  const parts = [el('span', { text: `${capture.totalBytes} bytes` })];
+
+  const candidates = capture.protocolCandidates ?? [];
+  if (candidates.length) {
+    parts.push(document.createTextNode(' · likely: '));
+    candidates.forEach((c, i) => {
+      if (i) parts.push(document.createTextNode(', '));
+      parts.push(el('span', { text: c.partNumber }));
+      parts.push(el('span', { class: 'muted', text: ` (${c.confidence})` }));
+    });
+  }
+
+  const warnings = capture.warnings ?? [];
+  if (warnings.length) parts.push(el('div', { class: 'warn', text: warnings.join(' ') }));
+
+  render('uart-meta', ...parts);
 }
 
 async function uartOnce() {
   const capture = await call('uart.capture', {
-    rx: Number($('uart-rx').value),
+    rx: num('uart-rx', 'RX GPIO'),
     baud: Number($('uart-baud').value),
     durationMs: 3000,
   });
@@ -163,9 +243,17 @@ function toggleStream() {
     return;
   }
 
+  let rx;
+  try {
+    rx = num('uart-rx', 'RX GPIO');
+  } catch (error) {
+    setStatus(error.message, 'err');
+    return;
+  }
+
   const params = new URLSearchParams({
     port: $('port').value,
-    rx: $('uart-rx').value,
+    rx: String(rx),
     baud: $('uart-baud').value,
   });
   stream = new EventSource(`/api/uart/stream?${params}`);
@@ -189,42 +277,64 @@ function toggleStream() {
 async function identify() {
   const result = await call('component.identify', {
     interface: 'UART',
-    rx: Number($('uart-rx').value),
+    rx: num('uart-rx', 'RX GPIO'),
     baud: Number($('uart-baud').value),
     depth: 'STANDARD',
   });
   show('out-identify', result);
+
   const id = result.identified;
-  $('uart-meta').innerHTML = id
-    ? `Identified <strong>${id.partNumber}</strong> (${id.manufacturer ?? 'unknown maker'}) —
-       <span class="ok">${id.confidence}</span>, score ${id.score?.toFixed?.(2) ?? '?'}
-       ${result.ambiguous ? '<span class="warn">· ambiguous</span>' : ''}
-       ${id.contradictedRules?.length ? `<div class="warn">${id.contradictedRules.length} rule(s) contradicted by the evidence</div>` : ''}`
-    : '<span class="warn">No component matched with usable confidence.</span>';
+  if (!id) {
+    render('uart-meta', el('span', { class: 'warn', text: 'No component matched with usable confidence.' }));
+    return;
+  }
+
+  const parts = [
+    document.createTextNode('Identified '),
+    el('strong', { text: id.partNumber }),
+    document.createTextNode(` (${id.manufacturer ?? 'unknown maker'}) — `),
+    el('span', { class: 'ok', text: id.confidence }),
+    document.createTextNode(`, score ${id.score?.toFixed?.(2) ?? '?'}`),
+  ];
+  if (result.ambiguous) parts.push(el('span', { class: 'warn', text: ' · ambiguous' }));
+  if (id.contradictedRules?.length) {
+    parts.push(el('div', {
+      class: 'warn',
+      text: `${id.contradictedRules.length} rule(s) contradicted by the evidence`,
+    }));
+  }
+  render('uart-meta', ...parts);
 }
 
 // ── drive ──────────────────────────────────────────────
 async function driveWrite() {
-  const pin = Number($('drive-pin').value);
-  if (!confirm(`Set GPIO${pin} to ${$('drive-level').value === '1' ? 'HIGH' : 'LOW'}?\n\nThis changes the physical state of the pin.`)) return;
+  let pin;
   try {
-    const result = await call('hardware.execute', {
-      operations: [{ op: 'GPIO_WRITE', pin, level: Number($('drive-level').value) }],
-    });
-    renderDrive(result);
+    pin = num('drive-pin', 'Pin');
   } catch (error) {
-    $('drive-result').innerHTML = `<span class="err">${error.message}</span>`;
+    render('drive-result', el('span', { class: 'err', text: error.message }));
+    return;
+  }
+
+  const level = Number($('drive-level').value);
+  if (!confirm(`Set GPIO${pin} to ${level === 1 ? 'HIGH' : 'LOW'}?\n\nThis changes the physical state of the pin.`)) return;
+
+  try {
+    renderDrive(await call('hardware.execute', {
+      operations: [{ op: 'GPIO_WRITE', pin, level }],
+    }));
+  } catch (error) {
+    render('drive-result', el('span', { class: 'err', text: error.message }));
   }
 }
 
 async function driveRead() {
   try {
-    const result = await call('hardware.execute', {
-      operations: [{ op: 'GPIO_READ', pins: [Number($('drive-pin').value)] }],
-    });
-    renderDrive(result);
+    renderDrive(await call('hardware.execute', {
+      operations: [{ op: 'GPIO_READ', pins: [num('drive-pin', 'Pin')] }],
+    }));
   } catch (error) {
-    $('drive-result').innerHTML = `<span class="err">${error.message}</span>`;
+    render('drive-result', el('span', { class: 'err', text: error.message }));
   }
 }
 
@@ -233,22 +343,32 @@ function renderDrive(result) {
   const rejections = outcome?.rejections ?? [];
 
   if (rejections.length) {
-    // A refusal is a successful outcome, not an error: it means the guard caught a
-    // physically invalid request. `executed: false` is the part that matters — the
-    // request never reached the board.
-    $('drive-result').innerHTML =
-      `<span class="err">Refused before transmission.</span> ` +
-      rejections.map((r) => `<strong>${r.kind}</strong> — ${r.detail}${r.remedy ? ` <em>${r.remedy}</em>` : ''}`).join('; ') +
-      `<div class="muted">executed: ${outcome.executed} · sent to agent: ${outcome.agentRequest ? 'yes' : 'no'}</div>`;
+    // A refusal is a successful outcome, not an error: the guard caught a physically
+    // invalid request. `executed: false` is the part that matters — it never reached
+    // the board.
+    const parts = [el('span', { class: 'err', text: 'Refused before transmission. ' })];
+    rejections.forEach((r, i) => {
+      if (i) parts.push(document.createTextNode('; '));
+      parts.push(el('strong', { text: r.kind }));
+      parts.push(document.createTextNode(` — ${r.detail}`));
+      if (r.remedy) parts.push(el('em', { text: ` ${r.remedy}` }));
+    });
+    parts.push(el('div', {
+      class: 'muted',
+      text: `executed: ${outcome.executed} · sent to agent: ${outcome.agentRequest ? 'yes' : 'no'}`,
+    }));
+    render('drive-result', ...parts);
     return;
   }
 
   const value = outcome?.samples?.length ? `samples: ${outcome.samples.join(', ')}`
     : outcome?.data ? JSON.stringify(outcome.data)
     : 'no data returned';
-  $('drive-result').innerHTML =
-    `<span class="ok">Executed</span> in ${outcome?.durationMs ?? '?'} ms — ${value}` +
-    (outcome?.warnings?.length ? `<div class="warn">${outcome.warnings.join(' ')}</div>` : '');
+
+  render('drive-result',
+    el('span', { class: 'ok', text: 'Executed' }),
+    document.createTextNode(` in ${outcome?.durationMs ?? '?'} ms — ${value}`),
+    outcome?.warnings?.length ? el('div', { class: 'warn', text: outcome.warnings.join(' ') }) : null);
 }
 
 // ── wiring ─────────────────────────────────────────────
@@ -288,20 +408,34 @@ document.querySelectorAll('button[data-action]').forEach((button) => {
   });
 });
 
+const guard = (fn) => () => fn().catch((error) => setStatus(error.message, 'err'));
+
 $('refresh-ports').addEventListener('click', loadPorts);
-$('i2c-scan').addEventListener('click', () => runI2cScan().catch(() => {}));
-$('uart-once').addEventListener('click', () => uartOnce().catch(() => {}));
+$('i2c-scan').addEventListener('click', guard(runI2cScan));
+$('uart-once').addEventListener('click', guard(uartOnce));
 $('uart-stream').addEventListener('click', toggleStream);
-$('uart-identify').addEventListener('click', () => identify().catch(() => {}));
+$('uart-identify').addEventListener('click', guard(identify));
 $('drive-write').addEventListener('click', driveWrite);
 $('drive-read').addEventListener('click', driveRead);
 
 (async function init() {
-  meta = await (await fetch('/api/meta')).json();
+  // If this fails the panel cannot know whether driving is permitted. Fail closed:
+  // assume it is not, and say why, rather than offering controls the server refuses.
+  try {
+    const res = await fetch('/api/meta');
+    if (!res.ok) throw new Error(`server returned ${res.status}`);
+    meta = await res.json();
+  } catch (error) {
+    setStatus(`cannot reach the control panel server: ${error.message}`, 'err');
+    $('link-dot').className = 'dot bad';
+    meta = { allowDrive: false, actions: {} };
+  }
+
   const badge = $('drive-badge');
   badge.textContent = meta.allowDrive ? 'drive enabled' : 'drive locked';
   badge.classList.toggle('on', meta.allowDrive);
   $('drive-locked').hidden = meta.allowDrive;
   $('drive-controls').hidden = !meta.allowDrive;
+
   await loadPorts();
 })();

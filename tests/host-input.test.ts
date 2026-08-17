@@ -30,7 +30,11 @@ import {
 
 describe('project path validation against real host paths', () => {
   for (const { path, valid, provenance, note } of PROJECT_PATHS) {
-    const label = path.trim() === '' ? JSON.stringify(path) : JSON.stringify(path);
+    // Name the blank cases explicitly: JSON.stringify('   ') is easy to misread in
+    // test output, and empty vs whitespace-only are different inputs.
+    const label = path === '' ? '(empty string)'
+      : path.trim() === '' ? '(whitespace only)'
+      : JSON.stringify(path);
     it(`${valid ? 'accepts' : 'rejects'} ${label} [${provenance}]${note ? ` — ${note}` : ''}`, () => {
       assert.equal(validateProjectPath(path), valid);
     });

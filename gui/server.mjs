@@ -199,6 +199,31 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+/**
+ * Validate and clamp the streaming parameters.
+ *
+ * The POST actions clamp their inputs; this is the one endpoint reachable by a
+ * hand-written URL, so it must not be the loose one. Returns a reason string when
+ * the request should be refused.
+ */
+function validateStreamParams(params) {
+  const rx = Number(params.rx);
+  if (!Number.isInteger(rx) || rx < 0 || rx > 48) {
+    return { error: `rx must be a GPIO number between 0 and 48 (got "${params.rx}")` };
+  }
+
+  const baud = params.baud === undefined ? 9600 : Number(params.baud);
+  if (!Number.isFinite(baud) || baud < 300 || baud > 3000000) {
+    return { error: `baud must be between 300 and 3000000 (got "${params.baud}")` };
+  }
+
+  if (params.port !== undefined && !/^(COM\d+|\/dev\/tty[\w.-]+)$/i.test(params.port)) {
+    return { error: `not a serial port name: "${params.port}"` };
+  }
+
+  return { rx, baud: Math.round(baud), port: params.port || undefined };
+}
+
 /** SSE stream: repeated short captures, because the agent caps each at 512 bytes. */
 async function streamUart(req, res, params) {
   res.writeHead(200, {
@@ -223,8 +248,8 @@ async function streamUart(req, res, params) {
       // port against a button press, nor collide with one.
       const capture = await withPortLock(params.port, () => uartDiscovery({
         port: params.port,
-        rx: Number(params.rx),
-        baud: Number(params.baud ?? 9600),
+        rx: params.rx,
+        baud: params.baud,
         durationMs: 1500,
         mode: 'PASSIVE',
       }));
@@ -255,8 +280,9 @@ const server = createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/uart/stream') {
-    if (!url.searchParams.get('rx')) return sendJson(res, 400, { error: 'rx is required' });
-    return streamUart(req, res, Object.fromEntries(url.searchParams));
+    const params = validateStreamParams(Object.fromEntries(url.searchParams));
+    if (params.error) return sendJson(res, 400, { error: params.error });
+    return streamUart(req, res, params);
   }
 
   if (url.pathname.startsWith('/api/')) {

@@ -13,6 +13,7 @@ import {
   type InterrogationDepth,
   type ObservedValue,
   type ReproducibilityRecord,
+  type TransportErrorKind,
 } from '../types/hardware.js';
 import { validateSerialPort } from '../utils/validation.js';
 import { AGENT_BAUD_RATE, createTransport } from './transport.js';
@@ -36,7 +37,7 @@ export interface InterrogationSession {
    * that matches the actual failure — a busy port and missing firmware need opposite
    * advice, and conflating them sends people to reflash working boards.
    */
-  agentErrorKind?: string;
+  agentErrorKind?: TransportErrorKind;
   family: Esp32Family;
   reproducibility: Partial<ReproducibilityRecord>;
 }
@@ -77,6 +78,32 @@ export async function resolvePort(port?: string): Promise<ObservedValue<string>>
   }
 }
 
+/**
+ * One-line account of why the target was not reached.
+ *
+ * Separate templates per case rather than one string patched afterwards: naming the
+ * port is optional, and an earlier version papered over the missing name with a
+ * `.replace('  ', ' ')`, which silently depends on the exact spacing of a sentence
+ * nobody will remember to preserve.
+ */
+function describeUnreachable(kind: TransportErrorKind | undefined, port: string | null): string {
+  switch (kind) {
+    case 'PORT_UNAVAILABLE':
+      return port
+        ? `The serial port ${port} could not be opened, so the target was never contacted.`
+        : 'The serial port could not be opened, so the target was never contacted.';
+
+    case 'NO_TRANSPORT':
+      return 'No serial transport is available on this host, so the target was never contacted.';
+
+    default:
+      return (
+        'The interrogation agent did not respond. Flash firmware/interrogation-agent to the ' +
+        'target, or pass a port that has it running.'
+      );
+  }
+}
+
 /** Open a session, probing for the interrogation agent. */
 export async function openSession(options: SessionOptions = {}): Promise<InterrogationSession> {
   const port = await resolvePort(options.port);
@@ -96,13 +123,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Interro
     ? `Interrogation agent ${ping.data?.agentVersion ?? 'present'} responded on ${
         port.value ?? 'the configured port'
       }.`
-    : ping.error ??
-      (agentErrorKind === 'PORT_UNAVAILABLE'
-        ? `The serial port ${port.value ?? ''} could not be opened, so the target was never contacted.`.replace('  ', ' ')
-        : agentErrorKind === 'NO_TRANSPORT'
-          ? 'No serial transport is available on this host, so the target was never contacted.'
-          : 'The interrogation agent did not respond. Flash firmware/interrogation-agent to the ' +
-            'target, or pass a port that has it running.');
+    : ping.error ?? describeUnreachable(agentErrorKind, port.value);
 
   const reproducibility = agentPresent
     ? await captureReproducibilityFacts(transport)
@@ -190,7 +211,7 @@ export function coerceDepth(value: unknown, fallback: InterrogationDepth = 'STAN
  * `kind` is optional so callers with no error kind to hand still compile; without one
  * the generic firmware advice remains the safest default.
  */
-export function agentUnavailableHelp(detail: string, kind?: string): string[] {
+export function agentUnavailableHelp(detail: string, kind?: TransportErrorKind): string[] {
   const lines = [detail];
 
   switch (kind) {

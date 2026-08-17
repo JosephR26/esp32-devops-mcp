@@ -10,12 +10,15 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { agentUnavailableHelp } from '../src/hardware/session.js';
+import type { TransportErrorKind } from '../src/types/hardware.js';
 
-const joined = (kind?: string) => agentUnavailableHelp('detail line', kind).join(' ');
+const joined = (kind?: TransportErrorKind) => agentUnavailableHelp('detail line', kind).join(' ');
 
 describe('agent-unavailable diagnosis', () => {
   it('always leads with the caller-supplied detail', () => {
-    for (const kind of [undefined, 'PORT_UNAVAILABLE', 'NO_TRANSPORT', 'AGENT_NOT_PRESENT', 'TIMEOUT']) {
+    const kinds: (TransportErrorKind | undefined)[] =
+      [undefined, 'PORT_UNAVAILABLE', 'NO_TRANSPORT', 'AGENT_NOT_PRESENT', 'TIMEOUT'];
+    for (const kind of kinds) {
       assert.equal(agentUnavailableHelp('detail line', kind)[0], 'detail line');
     }
   });
@@ -42,7 +45,8 @@ describe('agent-unavailable diagnosis', () => {
   });
 
   it('does advise flashing when the agent genuinely did not answer', () => {
-    for (const kind of ['AGENT_NOT_PRESENT', 'TIMEOUT']) {
+    const kinds: TransportErrorKind[] = ['AGENT_NOT_PRESENT', 'TIMEOUT'];
+    for (const kind of kinds) {
       const text = joined(kind);
       assert.match(text, /interrogation agent firmware/i, kind);
       assert.match(text, /pio run -e esp32dev -t upload/, kind);
@@ -52,7 +56,12 @@ describe('agent-unavailable diagnosis', () => {
   it('falls back to the firmware advice for an unknown or absent kind', () => {
     // Safest default: an unrecognised failure is more likely a missing agent than a
     // held port, and the advice is at least harmless.
-    for (const kind of [undefined, 'INTERNAL', 'SOMETHING_NEW']) {
+    // 'SOMETHING_NEW' is cast deliberately. The kind arrives as JSON from the serial
+    // bridge, so a value outside the union can reach this function at runtime even
+    // though the type forbids it at compile time — that path must still be safe.
+    const kinds: (TransportErrorKind | undefined)[] =
+      [undefined, 'INTERNAL', 'SOMETHING_NEW' as TransportErrorKind];
+    for (const kind of kinds) {
       assert.match(joined(kind), /interrogation agent firmware/i, String(kind));
     }
   });
