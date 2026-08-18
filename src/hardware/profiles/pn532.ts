@@ -444,38 +444,37 @@ export const PN532_PROFILE: ComponentProfile = {
   ],
 
   limitations: [
+    // ── Interface and addressing ──────────────────────────────────────────────
     'The PN532 has no flat register file over I2C — all access is through the command protocol.',
     'CIU register bitfield layouts are taken from NXP CIU documentation and are DOCUMENTED, not verified against this silicon.',
     'I2C reads are prefixed by a ready-status byte; frame offsets in raw captures shift by one accordingly.',
     'Interface selection is set by hardware DIP switches or strapping on most breakout boards and cannot be read back over the bus.',
     'Card emulation and peer-to-peer modes are not exercised by interrogation — they require an RF counterpart.',
 
-    // The following were established against physical hardware. Each one produces a
-    // symptom that reads as a fault in something else, which is why they are recorded
-    // here rather than left for the next person to rediscover.
-
+    // ── Framing, established against physical hardware ────────────────────────
+    // Each of these produces a symptom that reads as a fault in something else,
+    // which is why they are recorded here rather than left to be rediscovered.
     'A command is answered in TWO parts: an ACK frame first, then the response once ready. A single read returns the ACK plus stale bytes and decodes as nonsense.',
     'The read buffer retains the PREVIOUS response. Bytes following a short frame are residue, not part of the current frame, and they decode plausibly enough to be mistaken for data. Trust the declared frame length.',
-    'InListPassiveTarget defaults to MxRtyPassiveActivation = 0xFF, meaning retry forever. With no target in the field the command never returns and the ready byte stays 0x00 — indistinguishable from a broken device. Cap retries with RFConfiguration item 0x05 first, so "no target" comes back as NbTg=0, which is a result rather than a hang.',
     'A command already in flight is aborted by writing a bare ACK frame: 00 00 FF 00 FF 00.',
     'SAMConfiguration should be issued after power-up before polling; some boards will not activate a target without it.',
     'Size reads generously. An ISO14443-4 activation carrying an ATS ran to 34 bytes on real hardware, and a 28-byte read truncated it mid-ATS.',
 
-    // Established against physical hardware over a long evening. Recorded so the next
-    // person spends ten seconds rather than repeating all of it.
-    'SPI mode is UNRELIABLE on breakout clones. One board was verified exhaustively — wiring ' +
-      'continuity probed pin-to-pad, interface-select switches confirmed with a meter and all ' +
-      'four positions tried, CS settling delays added manually, mode 0 and LSB-first per the ' +
-      'datasheet, RSTO measured driven high so the chip was awake and out of reset, and the ' +
-      'host SPI path proven by a loopback that echoed perfectly — and the module still never ' +
-      'modulated MISO in any configuration. The same board worked flawlessly over I2C first ' +
-      'time. If SPI is silent on a clone, prefer I2C rather than pursuing it.',
-    'The PN532 uses LSB-FIRST bit order on SPI, unlike almost every other SPI device. Getting ' +
-      'this wrong produces plausible-looking garbage rather than an obvious failure.',
-    'SPI framing is prefixed by a direction byte: 0x01 data write, 0x02 status read, 0x03 data ' +
-      'read. The status byte returns 0x01 when the device is ready.',
+    // ── Polling behaviour ─────────────────────────────────────────────────────
+    'InListPassiveTarget defaults to MxRtyPassiveActivation = 0xFF, meaning retry forever. With no target in the field the command never returns and the ready byte stays 0x00 — indistinguishable from a broken device.',
+    'Cap retries with RFConfiguration item 0x05 before polling, so "no target" comes back as NbTg=0 — a result rather than a hang.',
 
-    'The PN532 operates at 13.56 MHz ONLY. Low-frequency credentials (125 kHz EM4100, HID Prox and similar — most door-entry and building fobs) are in a different band and cannot be detected at any range. A poll returning NbTg=0 with such a fob present is correct behaviour, not a failure, and no amount of repositioning will change it.',
+    // ── SPI, established over a long evening ──────────────────────────────────
+    // Recorded so the next person spends ten seconds rather than repeating all of it.
+    'SPI mode is UNRELIABLE on breakout clones. If SPI is silent on a clone, prefer I2C rather than pursuing it — the board that never modulated MISO in any SPI configuration worked over I2C first time.',
+    'That SPI verdict was reached by elimination, not assumption: continuity probed pin-to-pad, interface-select switches confirmed with a meter and all four positions tried, CS settling delays added, mode 0 and LSB-first per the datasheet, and RSTO measured driven high so the chip was awake and out of reset.',
+    'The host SPI path was proven independently by a loopback that echoed perfectly, which is what made every earlier negative result mean anything. Establish that positive control BEFORE concluding anything from silence.',
+    'The PN532 uses LSB-FIRST bit order on SPI, unlike almost every other SPI device. Getting this wrong produces plausible-looking garbage rather than an obvious failure.',
+    'SPI framing is prefixed by a direction byte: 0x01 data write, 0x02 status read, 0x03 data read. The status byte returns 0x01 when the device is ready.',
+
+    // ── RF band ───────────────────────────────────────────────────────────────
+    'The PN532 operates at 13.56 MHz ONLY. Low-frequency credentials (125 kHz EM4100, HID Prox and similar — most door-entry and building fobs) are in a different band and cannot be detected at any range.',
+    'A poll returning NbTg=0 with a low-frequency fob present is correct behaviour, not a failure. No amount of repositioning will change it.',
   ],
 
   documentation: [
