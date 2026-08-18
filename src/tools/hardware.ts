@@ -1210,6 +1210,31 @@ export interface SpiDiscoveryOptions {
  * MISO line happens to hold. All-0x00 and all-0xFF captures are flagged as
  * degenerate rather than reported as data.
  */
+/**
+ * What to tell a caller whose SPI probes all came back uniform.
+ *
+ * A degenerate response is UNINTERPRETABLE on its own: "no device answered" and "the
+ * host cannot read at all" look exactly alike. Establishing which is true has to come
+ * FIRST, or every subsequent negative result means nothing — wiring checks, switch
+ * positions, CS timing and bit order can all be eliminated one by one and still leave
+ * you no wiser. A loopback settles it in one jumper.
+ *
+ * Exported so the wording is testable and cannot quietly erode.
+ */
+export const DEGENERATE_SPI_GUIDANCE: readonly string[] = [
+  'Every probe returned a uniform 0x00 or 0xFF pattern. That is what an unconnected MISO ' +
+    'line looks like — it is not evidence of a device. Check MISO wiring, CS polarity and ' +
+    'whether the device requires a specific SPI mode.',
+  'BEFORE investigating the device further, prove the host side can read at all: ' +
+    'disconnect the device, jumper MOSI directly to MISO, and repeat the transfer. A ' +
+    'loopback MUST echo the bytes sent. Until that passes, a uniform response says ' +
+    'nothing about the device — it is equally consistent with a host that cannot read.',
+  'If the loopback echoes and the device still returns a uniform pattern, the device is ' +
+    'not responding on SPI. Verify with a meter that wiring and any interface-select ' +
+    'switches are what you believe, then suspect the device: some breakout clones do not ' +
+    'implement SPI usefully even when their documentation claims it.',
+];
+
 export async function spiDiscovery(
   options: SpiDiscoveryOptions = {}
 ): Promise<SpiDiscoveryReport> {
@@ -1484,11 +1509,7 @@ export async function spiDiscovery(
 
   const allDegenerate = probes.length > 0 && probes.every((p) => p.degenerate);
   if (allDegenerate) {
-    warnings.push(
-      'Every probe returned a uniform 0x00 or 0xFF pattern. That is what an unconnected MISO ' +
-        'line looks like — it is not evidence of a device. Check MISO wiring, CS polarity and ' +
-        'whether the device requires a specific SPI mode.'
-    );
+    warnings.push(...DEGENERATE_SPI_GUIDANCE);
   }
 
   const identification =

@@ -461,6 +461,20 @@ export const PN532_PROFILE: ComponentProfile = {
     'SAMConfiguration should be issued after power-up before polling; some boards will not activate a target without it.',
     'Size reads generously. An ISO14443-4 activation carrying an ATS ran to 34 bytes on real hardware, and a 28-byte read truncated it mid-ATS.',
 
+    // Established against physical hardware over a long evening. Recorded so the next
+    // person spends ten seconds rather than repeating all of it.
+    'SPI mode is UNRELIABLE on breakout clones. One board was verified exhaustively — wiring ' +
+      'continuity probed pin-to-pad, interface-select switches confirmed with a meter and all ' +
+      'four positions tried, CS settling delays added manually, mode 0 and LSB-first per the ' +
+      'datasheet, RSTO measured driven high so the chip was awake and out of reset, and the ' +
+      'host SPI path proven by a loopback that echoed perfectly — and the module still never ' +
+      'modulated MISO in any configuration. The same board worked flawlessly over I2C first ' +
+      'time. If SPI is silent on a clone, prefer I2C rather than pursuing it.',
+    'The PN532 uses LSB-FIRST bit order on SPI, unlike almost every other SPI device. Getting ' +
+      'this wrong produces plausible-looking garbage rather than an obvious failure.',
+    'SPI framing is prefixed by a direction byte: 0x01 data write, 0x02 status read, 0x03 data ' +
+      'read. The status byte returns 0x01 when the device is ready.',
+
     'The PN532 operates at 13.56 MHz ONLY. Low-frequency credentials (125 kHz EM4100, HID Prox and similar — most door-entry and building fobs) are in a different band and cannot be detected at any range. A poll returning NbTg=0 with such a fob present is correct behaviour, not a failure, and no amount of repositioning will change it.',
   ],
 
