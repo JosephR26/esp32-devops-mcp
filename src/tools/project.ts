@@ -92,6 +92,16 @@ void loop() {
 `,
 };
 
+/**
+ * An INI value with any trailing comment removed.
+ *
+ * PlatformIO accepts both `;` and `#` as comment introducers, so `board = esp32dev ; note`
+ * carries the note into the value unless it is stripped. Named rather than inlined because
+ * every value read out of platformio.ini needs it, and the board was simply the one where
+ * the omission was noticed first.
+ */
+const iniValue = (raw: string): string => raw.split(/[;#]/)[0].trim();
+
 export async function createProject(
   name: string,
   projectPath?: string,
@@ -183,12 +193,12 @@ export async function validateProject(projectPath?: string): Promise<ValidationR
   // A multi-environment project declares one board per environment, and matching only
   // the first reported "3 environments, 1 board" — which reads as a misconfigured
   // project rather than a parser that stopped early. Deduplicated because environments
-  // legitimately share a board, and comments are stripped so `board = esp32dev ; note`
+  // legitimately share a board, and `iniValue` strips comments so `board = esp32dev ; note`
   // does not become part of the name.
   const boards = [
     ...new Set(
       [...iniContent.matchAll(/^\s*board\s*=\s*(.+)$/gm)]
-        .map(m => m[1].split(/[;#]/)[0].trim())
+        .map(m => iniValue(m[1]))
         .filter(Boolean)
     ),
   ];
@@ -224,7 +234,7 @@ export async function validateProject(projectPath?: string): Promise<ValidationR
     config: {
       environments: envMatches,
       boards,
-      framework: frameworkMatch ? frameworkMatch[1].split(/[;#]/)[0].trim() : '',
+      framework: frameworkMatch ? iniValue(frameworkMatch[1]) : '',
     },
   };
 }

@@ -33,6 +33,30 @@ import {
 
 const ascii = (bytes: readonly number[]) => Buffer.from(bytes).toString('latin1');
 
+/**
+ * Named field accessors.
+ *
+ * NMEA is positional, so a raw index says nothing about what is being read and an
+ * off-by-one is invisible. Naming them makes a wrong field a readable mistake.
+ * The checksum suffix is stripped first so the last field parses like any other.
+ */
+const field = (sentence: string, index: number): string =>
+  sentence.replace(/\*..\r\n$/, '').split(',')[index];
+
+const rmc = {
+  status: (s: string) => field(s, 2),
+  date: (s: string) => field(s, 9),
+};
+
+const gga = {
+  fixQuality: (s: string) => field(s, 6),
+  satellitesUsed: (s: string) => field(s, 7),
+};
+
+const gsv = {
+  totalInView: (s: string) => Number(field(s, 3)),
+};
+
 /** Complete NMEA sentences only: `$`…CRLF. A truncated tail must not match. */
 const completeSentences = (bytes: readonly number[]): string[] =>
   ascii(bytes).match(/\$[^$\r\n]*\r\n/g) ?? [];
@@ -51,30 +75,46 @@ describe('NMEA transcripts', () => {
   it('does not treat a truncated tail as a sentence', () => {
     // Every live capture hits the agent's 512-byte cap. The final fragment has no
     // terminator and no checksum, so it is not a reading.
+    //
+    // The previous version of this assertion COULD NOT FAIL. It checked that no
+    // extracted sentence both lacked CRLF and ended with "$GPGS" — but every extracted
+    // sentence ends with CRLF by construction, so the predicate was never true and the
+    // assertion passed regardless of what the parser did. A check whose negative result
+    // is structurally guaranteed reports success without testing anything.
     const text = ascii(NMEA_TRUNCATED_TAIL.bytes);
-    assert.ok(text.endsWith('$GPGS'), 'fixture should end mid-sentence');
+    assert.ok(text.endsWith('$GPGS'), 'fixture should genuinely end mid-sentence');
 
     const sentences = completeSentences(NMEA_TRUNCATED_TAIL.bytes);
-    assert.equal(sentences.length, 1);
-    assert.ok(!sentences.some((s) => s.includes('$GPGS\r\n') === false && s.endsWith('$GPGS')));
+
+    // The complete sentence IS extracted...
+    assert.equal(sentences.length, 1, 'exactly one complete sentence in this capture');
+    assert.ok(sentences[0].startsWith('$GPRMC'), sentences[0]);
+    assert.ok(sentences[0].endsWith('\r\n'), 'a complete sentence is CRLF-terminated');
+
+    // ...and the truncated fragment, present in the raw input, is NOT.
+    assert.ok(text.includes('$GPGS'), 'the fragment is in the input');
+    assert.ok(
+      !sentences.some((s) => s.includes('$GPGS')),
+      'the truncated fragment must not appear in any extracted sentence'
+    );
   });
 
   it('keeps the date from a void fix rather than discarding the sentence', () => {
     // Time recovery needs one satellite; a position fix needs four. Discarding void
     // sentences throws away a valid clock.
-    const rmc = completeSentences(NMEA_NO_FIX.bytes).find((s) => s.startsWith('$GPRMC'));
-    assert.ok(rmc, 'expected an RMC sentence');
+    const sentence = completeSentences(NMEA_NO_FIX.bytes).find((s) => s.startsWith('$GPRMC'));
+    assert.ok(sentence, 'expected an RMC sentence');
 
-    const fields = rmc!.split(',');
-    assert.equal(fields[2], 'V', 'status should be void');
-    assert.equal(fields[9], '170826', 'date should still be present despite no fix');
+    assert.equal(rmc.status(sentence), 'V', 'status should be void');
+    assert.equal(rmc.date(sentence), '170826', 'date should still be present despite no fix');
   });
 
   it('reports no satellites used while a fix is absent', () => {
-    const gga = completeSentences(NMEA_NO_FIX.bytes).find((s) => s.startsWith('$GPGGA'));
-    const fields = gga!.split(',');
-    assert.equal(fields[6], '0', 'fix quality 0');
-    assert.equal(fields[7], '00', 'zero satellites used');
+    const sentence = completeSentences(NMEA_NO_FIX.bytes).find((s) => s.startsWith('$GPGGA'));
+    assert.ok(sentence, 'expected a GGA sentence');
+
+    assert.equal(gga.fixQuality(sentence), '0', 'fix quality 0');
+    assert.equal(gga.satellitesUsed(sentence), '00', 'zero satellites used');
   });
 
   it('counts the whole constellation across a multi-sentence GSV set', () => {
@@ -83,7 +123,7 @@ describe('NMEA transcripts', () => {
     const sentences = completeSentences(NMEA_GSV_MULTI_SENTENCE.bytes);
     assert.equal(sentences.length, 3, 'GSV set should span three sentences');
 
-    const totals = sentences.map((s) => Number(s.split(',')[3]));
+    const totals = sentences.map(gsv.totalInView);
     assert.deepEqual(totals, [11, 11, 11], 'every GSV sentence declares the same total');
 
     // Satellite records are 4 fields each, after the 4 header fields.
